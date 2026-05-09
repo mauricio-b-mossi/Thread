@@ -4,7 +4,8 @@
   "required": [
     "reviewer",
     "status",
-    "findings"
+    "findings",
+    "summary"
   ],
   "properties": {
     "reviewer": {
@@ -24,7 +25,9 @@
         "type": "object",
         "required": [
           "severity",
+          "file",
           "issue",
+          "why_it_matters",
           "suggested_fix"
         ],
         "properties": {
