@@ -1,0 +1,41 @@
+[autonomy]
+default_mode = "afk"
+large_feature_replan = "auto"
+auto_commit = true
+auto_merge = true
+require_remote_for_afk = true
+allow_local_only_afk = false
+
+[planner]
+default = "local"
+model = ""
+
+[checks]
+commands = []
+
+[reviewers]
+enabled = ["tests", "correctness", "security", "scope"]
+
+[replanning]
+max_new_tasks_per_feature = 25
+max_replans_per_feature = 2
+allow_mutate_done_tasks = false
+lock_in_progress_tasks = true
+
+[loop_guards]
+max_attempts_per_task = 3
+max_review_cycles = 2
+max_same_failure_repeats = 2
+max_total_runtime_minutes = 0
+max_task_runtime_minutes = 30
+max_diff_lines = 500
+max_files_changed = 8
+max_discovered_tasks_per_task = 5
+
+[policy]
+dependency_installs = "block"
+auth_changes = "block"
+database_migrations = "block"
+deployment_changes = "block"
+file_deletions = "block"
+large_diffs = "block"

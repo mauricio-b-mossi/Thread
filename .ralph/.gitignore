@@ -1,0 +1,4 @@
+ralph.db
+logs/
+backups/
+*.sqlite

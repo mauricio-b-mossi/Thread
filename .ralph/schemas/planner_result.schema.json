@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "feature_summary",
+    "candidate_tasks",
+    "reconciliation_decisions",
+    "dependency_changes",
+    "risk_flags",
+    "requires_human_decision"
+  ],
+  "properties": {
+    "feature_summary": {
+      "type": "string"
+    },
+    "candidate_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "reconciliation_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "dependency_changes": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "risk_flags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requires_human_decision": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}
