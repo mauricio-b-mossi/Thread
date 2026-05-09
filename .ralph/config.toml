@@ -28,14 +28,14 @@ max_review_cycles = 2
 max_same_failure_repeats = 2
 max_total_runtime_minutes = 0
 max_task_runtime_minutes = 30
-max_diff_lines = 500
-max_files_changed = 8
+max_diff_lines = 5000
+max_files_changed = 80
 max_discovered_tasks_per_task = 5
 
 [policy]
-dependency_installs = "block"
+dependency_installs = "allow"
 auth_changes = "block"
-database_migrations = "block"
+database_migrations = "allow"
 deployment_changes = "block"
 file_deletions = "block"
-large_diffs = "block"
+large_diffs = "allow"
