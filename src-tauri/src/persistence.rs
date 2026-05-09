@@ -29,10 +29,11 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "create_core_persistence_tables",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "create_core_persistence_tables",
+        sql: r#"
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY NOT NULL,
             title TEXT NOT NULL,
@@ -91,7 +92,17 @@ const MIGRATIONS: &[Migration] = &[Migration {
         CREATE INDEX IF NOT EXISTS idx_task_events_task_id_created_at
             ON task_events(task_id, created_at);
     "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "enforce_single_active_session",
+        sql: r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_one_active
+            ON sessions((1))
+            WHERE ended_at IS NULL;
+    "#,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
@@ -663,13 +674,19 @@ mod tests {
         let mut task = sample_task();
 
         insert_task(&conn, &task).expect("insert task");
-        assert_eq!(get_task(&conn, "task-1").expect("read task"), Some(task.clone()));
+        assert_eq!(
+            get_task(&conn, "task-1").expect("read task"),
+            Some(task.clone())
+        );
 
         task.status = "active".to_string();
         task.next_action = Some("Run cargo test".to_string());
         task.updated_at = "2026-05-09T12:15:00Z".to_string();
         update_task(&conn, &task).expect("update task");
-        assert_eq!(get_task(&conn, "task-1").expect("read updated task"), Some(task.clone()));
+        assert_eq!(
+            get_task(&conn, "task-1").expect("read updated task"),
+            Some(task.clone())
+        );
 
         let mut session = sample_session();
         insert_session(&conn, &session).expect("insert session");
@@ -707,7 +724,10 @@ mod tests {
         );
 
         delete_session(&conn, "session-1").expect("delete session");
-        assert_eq!(get_session(&conn, "session-1").expect("read deleted session"), None);
+        assert_eq!(
+            get_session(&conn, "session-1").expect("read deleted session"),
+            None
+        );
 
         delete_task(&conn, "task-1").expect("delete task");
         assert_eq!(get_task(&conn, "task-1").expect("read deleted task"), None);
