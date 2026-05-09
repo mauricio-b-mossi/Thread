@@ -11,7 +11,7 @@ default = "local"
 model = ""
 
 [checks]
-commands = []
+commands = ["powershell -NoProfile -ExecutionPolicy Bypass -Command \"if (Test-Path package.json) { npm run check --if-present } else { Write-Host 'No package.json yet; scaffold checks pending.' }\""]
 
 [reviewers]
 enabled = ["tests", "correctness", "security", "scope"]
