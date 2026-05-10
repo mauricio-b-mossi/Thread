@@ -137,6 +137,7 @@ export interface CompleteSessionInput {
   sessionId?: string;
   progressNote?: string;
   nextAction?: string;
+  confirmLongTermCompletion?: boolean;
 }
 
 export type CompleteSessionResult = ActiveSession;

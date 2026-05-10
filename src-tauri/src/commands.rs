@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 type CommandResult<T> = Result<T, CommandError>;
 
@@ -213,6 +213,7 @@ pub struct CompleteSessionInput {
     pub session_id: Option<String>,
     pub progress_note: Option<String>,
     pub next_action: Option<String>,
+    pub confirm_long_term_completion: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,9 +330,14 @@ pub fn listRecentThreads(
 }
 
 #[tauri::command]
-pub fn startSession(app: AppHandle, input: StartSessionInput) -> CommandResult<ActiveSession> {
+pub async fn startSession(
+    app: AppHandle,
+    input: StartSessionInput,
+) -> CommandResult<ActiveSession> {
     let conn = open_connection(&app)?;
-    start_session(&conn, input)
+    let active_session = start_session(&conn, input)?;
+    open_floating_session_window(&app)?;
+    Ok(active_session)
 }
 
 #[tauri::command]
@@ -356,9 +362,11 @@ pub fn stopSession(app: AppHandle, input: StopSessionInput) -> CommandResult<Act
 }
 
 #[tauri::command]
-pub fn switchTask(app: AppHandle, input: SwitchTaskInput) -> CommandResult<ActiveSession> {
+pub async fn switchTask(app: AppHandle, input: SwitchTaskInput) -> CommandResult<ActiveSession> {
     let conn = open_connection(&app)?;
-    switch_task(&conn, input)
+    let active_session = switch_task(&conn, input)?;
+    open_floating_session_window(&app)?;
+    Ok(active_session)
 }
 
 #[tauri::command]
@@ -422,6 +430,32 @@ pub fn openDataFolder(app: AppHandle) -> CommandResult<OpenDataFolderResult> {
 
 fn open_connection(app: &AppHandle) -> CommandResult<Connection> {
     persistence::open_app_database(app).map_err(to_internal_error)
+}
+
+fn open_floating_session_window(app: &AppHandle) -> CommandResult<()> {
+    if let Some(window) = app.get_webview_window("floating") {
+        window.show().map_err(to_internal_error)?;
+        window.set_focus().map_err(to_internal_error)?;
+    } else {
+        WebviewWindowBuilder::new(
+            app,
+            "floating",
+            WebviewUrl::App("index.html#/floating".into()),
+        )
+        .title("Thread")
+        .inner_size(360.0, 180.0)
+        .min_inner_size(280.0, 120.0)
+        .resizable(false)
+        .always_on_top(get_settings(&open_connection(app)?)?.floating_window_always_on_top)
+        .build()
+        .map_err(to_internal_error)?;
+    }
+
+    if let Some(today) = app.get_webview_window("today") {
+        today.hide().map_err(to_internal_error)?;
+    }
+
+    Ok(())
 }
 
 fn create_task(conn: &Connection, input: CreateTaskInput) -> CommandResult<Task> {
@@ -727,6 +761,10 @@ fn complete_session(
 ) -> CommandResult<ActiveSession> {
     let tx = conn.unchecked_transaction().map_err(to_internal_error)?;
     let active_session = require_active_session(&tx, input.session_id.as_deref())?;
+    validate_completion_confirmation(
+        &active_session.1,
+        input.confirm_long_term_completion.unwrap_or(false),
+    )?;
     let ended = end_active_session(
         &tx,
         active_session,
@@ -746,15 +784,21 @@ fn stop_session(
 ) -> CommandResult<ActiveSession> {
     let tx = conn.unchecked_transaction().map_err(to_internal_error)?;
     let active_session = require_active_session(&tx, input.session_id.as_deref())?;
-    let destination =
-        validate_stop_destination(input.destination_status.as_deref(), &active_session.1)?;
+    let progress_note = normalize_optional_text(input.progress_note);
+    let next_action = normalize_optional_text(input.next_action);
+    validate_long_term_stop_requirements(&active_session.1, &progress_note, &next_action)?;
+    let destination = validate_stop_destination(
+        input.destination_status.as_deref(),
+        &active_session.1,
+        end_reason,
+    )?;
 
     let ended = end_active_session(
         &tx,
         active_session,
         end_reason,
-        input.progress_note,
-        input.next_action,
+        progress_note,
+        next_action,
         Some(destination),
     )?;
     tx.commit().map_err(to_internal_error)?;
@@ -778,14 +822,20 @@ fn switch_task(conn: &Connection, input: SwitchTaskInput) -> CommandResult<Activ
         None => get_settings(&tx)?.donut_lap_duration_seconds,
     };
 
-    let destination =
-        validate_stop_destination(input.destination_status.as_deref(), &active_session.1)?;
+    let progress_note = normalize_optional_text(input.progress_note);
+    let next_action = normalize_optional_text(input.next_action);
+    validate_long_term_stop_requirements(&active_session.1, &progress_note, &next_action)?;
+    let destination = validate_stop_destination(
+        input.destination_status.as_deref(),
+        &active_session.1,
+        END_REASON_SWITCHED,
+    )?;
     end_active_session(
         &tx,
         active_session,
         END_REASON_SWITCHED,
-        input.progress_note,
-        input.next_action,
+        progress_note,
+        next_action,
         Some(destination),
     )?;
 
@@ -829,8 +879,8 @@ fn resolve_session_recovery(
                 &tx,
                 active_session,
                 END_REASON_APP_CLOSED,
-                input.progress_note,
-                input.next_action,
+                normalize_optional_text(input.progress_note),
+                normalize_optional_text(input.next_action),
                 None,
             )?;
 
@@ -845,8 +895,8 @@ fn resolve_session_recovery(
                 &tx,
                 active_session,
                 END_REASON_DISCARDED,
-                input.progress_note,
-                input.next_action,
+                normalize_optional_text(input.progress_note),
+                normalize_optional_text(input.next_action),
                 None,
             )?;
 
@@ -1330,6 +1380,7 @@ fn validate_end_reason(end_reason: &str) -> CommandResult<&str> {
 fn validate_stop_destination(
     destination_status: Option<&str>,
     task: &DbTask,
+    end_reason: &str,
 ) -> CommandResult<String> {
     let destination = destination_status
         .unwrap_or_else(|| default_stopped_status_for_task(task))
@@ -1342,7 +1393,53 @@ fn validate_stop_destination(
         ));
     }
 
+    if task.kind == TASK_KIND_LONG_TERM
+        && matches!(end_reason, END_REASON_STOPPED | END_REASON_SWITCHED)
+        && !matches!(
+            destination.as_str(),
+            TASK_STATUS_BACKLOG | TASK_STATUS_PICKUP
+        )
+    {
+        return Err(CommandError::validation(
+            "Long-term tasks can only stop to backlog or pickup.",
+        ));
+    }
+
     Ok(destination)
+}
+
+fn validate_long_term_stop_requirements(
+    task: &DbTask,
+    progress_note: &Option<String>,
+    next_action: &Option<String>,
+) -> CommandResult<()> {
+    if task.kind != TASK_KIND_LONG_TERM {
+        return Ok(());
+    }
+
+    if progress_note.is_none() {
+        return Err(CommandError::validation(
+            "Stopping a long-term task requires a progress note.",
+        ));
+    }
+
+    if next_action.is_none() {
+        return Err(CommandError::validation(
+            "Stopping a long-term task requires a next action.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_completion_confirmation(task: &DbTask, confirmed: bool) -> CommandResult<()> {
+    if task.kind == TASK_KIND_LONG_TERM && !confirmed {
+        return Err(CommandError::validation(
+            "Completing a long-term task requires explicit confirmation.",
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_startable_task(task: &DbTask) -> CommandResult<()> {
@@ -2065,6 +2162,335 @@ mod tests {
             .expect("active session remains open");
         assert_eq!(active_session.task.id, task.id);
         assert_eq!(active_session.task.status, TASK_STATUS_ACTIVE);
+    }
+
+    #[test]
+    fn pickup_start_creates_only_active_session_and_hides_from_pickup() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start pickup session");
+
+        assert_eq!(active.task.status, TASK_STATUS_ACTIVE);
+        assert_eq!(active.session.ended_at, None);
+        assert_eq!(active.session.duration_seconds, None);
+
+        let today = list_today(&conn).expect("list today");
+        assert_eq!(
+            today.active_session.expect("active session").session.id,
+            active.session.id
+        );
+        assert!(!today.pickup.iter().any(|pickup| pickup.id == task.id));
+
+        let second_task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("second task");
+        let error = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: second_task.id,
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect_err("second active session rejected");
+        assert_eq!(error.code, "conflict");
+        assert!(error.message.contains("switchTask"));
+    }
+
+    #[test]
+    fn completing_pickup_ends_session_and_removes_from_pickup() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start pickup session");
+
+        let completed = complete_session(
+            &conn,
+            CompleteSessionInput {
+                session_id: Some(active.session.id.clone()),
+                progress_note: Some("Finished it".to_string()),
+                next_action: None,
+                confirm_long_term_completion: None,
+            },
+        )
+        .expect("complete pickup session");
+
+        assert_eq!(completed.task.status, TASK_STATUS_COMPLETED);
+        assert!(completed.task.completed_at.is_some());
+        assert_eq!(
+            completed.session.end_reason.as_deref(),
+            Some(END_REASON_COMPLETED)
+        );
+        assert!(completed.session.ended_at.is_some());
+        assert!(completed.session.duration_seconds.is_some());
+        assert!(get_active_session(&conn)
+            .expect("read active session")
+            .is_none());
+        assert!(!list_today(&conn)
+            .expect("list today")
+            .pickup
+            .iter()
+            .any(|pickup| pickup.id == task.id));
+    }
+
+    #[test]
+    fn stopping_pickup_defaults_back_to_pickup_with_optional_notes() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start pickup session");
+
+        let stopped = stop_session(
+            &conn,
+            StopSessionInput {
+                session_id: Some(active.session.id),
+                progress_note: None,
+                next_action: Some("Resume the draft".to_string()),
+                destination_status: None,
+            },
+            END_REASON_STOPPED,
+        )
+        .expect("stop pickup session");
+
+        assert_eq!(stopped.task.status, TASK_STATUS_PICKUP);
+        assert_eq!(
+            stopped.task.next_action.as_deref(),
+            Some("Resume the draft")
+        );
+        assert_eq!(
+            stopped.session.end_reason.as_deref(),
+            Some(END_REASON_STOPPED)
+        );
+        assert!(stopped.session.duration_seconds.is_some());
+        assert!(list_today(&conn)
+            .expect("list today")
+            .pickup
+            .iter()
+            .any(|pickup| pickup.id == task.id));
+    }
+
+    #[test]
+    fn switch_task_ends_current_session_and_starts_target() {
+        let conn = in_memory_db();
+        let first = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("first task");
+        let second = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("second task");
+        let original = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: first.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start first session");
+
+        let switched = switch_task(
+            &conn,
+            SwitchTaskInput {
+                task_id: second.id.clone(),
+                progress_note: Some("Paused first".to_string()),
+                next_action: Some("Return to first".to_string()),
+                destination_status: None,
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("switch task");
+
+        assert_eq!(switched.task.id, second.id);
+        assert_eq!(switched.task.status, TASK_STATUS_ACTIVE);
+        assert_eq!(
+            require_task(&conn, &first.id).expect("read first").status,
+            TASK_STATUS_PICKUP
+        );
+        let ended_original = persistence::get_session(&conn, &original.session.id)
+            .expect("read original")
+            .expect("original session");
+        assert_eq!(
+            ended_original.end_reason.as_deref(),
+            Some(END_REASON_SWITCHED)
+        );
+        assert!(ended_original.duration_seconds.is_some());
+        assert_eq!(
+            get_active_session(&conn)
+                .expect("read active")
+                .expect("active after switch")
+                .session
+                .id,
+            switched.session.id
+        );
+    }
+
+    #[test]
+    fn long_term_stop_requires_progress_note() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_LONG_TERM)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start long-term session");
+
+        let error = stop_session(
+            &conn,
+            StopSessionInput {
+                session_id: None,
+                progress_note: None,
+                next_action: Some("Plan the next slice".to_string()),
+                destination_status: None,
+            },
+            END_REASON_STOPPED,
+        )
+        .expect_err("progress note required");
+
+        assert_eq!(error.code, "validation");
+        assert!(error.message.contains("progress note"));
+        assert_eq!(
+            get_active_session(&conn)
+                .expect("read active")
+                .expect("still active")
+                .task
+                .id,
+            task.id
+        );
+    }
+
+    #[test]
+    fn long_term_stop_requires_next_action() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_LONG_TERM)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start long-term session");
+
+        let error = stop_session(
+            &conn,
+            StopSessionInput {
+                session_id: None,
+                progress_note: Some("Mapped the next phase".to_string()),
+                next_action: None,
+                destination_status: None,
+            },
+            END_REASON_STOPPED,
+        )
+        .expect_err("next action required");
+
+        assert_eq!(error.code, "validation");
+        assert!(error.message.contains("next action"));
+        assert_eq!(
+            get_active_session(&conn)
+                .expect("read active")
+                .expect("still active")
+                .task
+                .id,
+            task.id
+        );
+    }
+
+    #[test]
+    fn long_term_stop_returns_to_backlog_or_pickup_only() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_LONG_TERM)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start long-term session");
+
+        let error = stop_session(
+            &conn,
+            StopSessionInput {
+                session_id: None,
+                progress_note: Some("Made progress".to_string()),
+                next_action: Some("Continue tomorrow".to_string()),
+                destination_status: Some(TASK_STATUS_COMPLETED.to_string()),
+            },
+            END_REASON_STOPPED,
+        )
+        .expect_err("invalid long-term stop destination");
+        assert_eq!(error.code, "validation");
+        assert!(error.message.contains("backlog or pickup"));
+
+        let stopped = stop_session(
+            &conn,
+            StopSessionInput {
+                session_id: None,
+                progress_note: Some("Made progress".to_string()),
+                next_action: Some("Continue tomorrow".to_string()),
+                destination_status: None,
+            },
+            END_REASON_STOPPED,
+        )
+        .expect("stop to backlog");
+
+        assert_eq!(stopped.task.status, TASK_STATUS_BACKLOG);
+    }
+
+    #[test]
+    fn completing_long_term_requires_explicit_confirmation() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_LONG_TERM)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start long-term session");
+
+        let error = complete_session(
+            &conn,
+            CompleteSessionInput {
+                session_id: Some(active.session.id.clone()),
+                progress_note: Some("All phases finished".to_string()),
+                next_action: None,
+                confirm_long_term_completion: None,
+            },
+        )
+        .expect_err("confirmation required");
+        assert_eq!(error.code, "validation");
+        assert!(error.message.contains("explicit confirmation"));
+
+        let completed = complete_session(
+            &conn,
+            CompleteSessionInput {
+                session_id: Some(active.session.id),
+                progress_note: Some("All phases finished".to_string()),
+                next_action: None,
+                confirm_long_term_completion: Some(true),
+            },
+        )
+        .expect("complete long-term task");
+
+        assert_eq!(completed.task.status, TASK_STATUS_COMPLETED);
+        assert!(completed.task.completed_at.is_some());
     }
 
     #[test]
