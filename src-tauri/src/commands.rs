@@ -579,8 +579,8 @@ fn archive_task(conn: &Connection, input: ArchiveTaskInput) -> CommandResult<Tas
 fn list_today(conn: &Connection) -> CommandResult<TodayPayload> {
     Ok(TodayPayload {
         active_session: get_active_session(conn)?,
-        pickup: list_tasks_by_status(conn, TASK_STATUS_PICKUP, 100)?,
-        backlog: list_tasks_by_status(conn, TASK_STATUS_BACKLOG, 100)?,
+        pickup: list_today_pickup_tasks(conn, 100)?,
+        backlog: list_today_backlog_tasks(conn, 6)?,
         recent_threads: list_recent_threads(conn, 5)?,
     })
 }
@@ -1040,6 +1040,88 @@ fn list_tasks_by_status(conn: &Connection, status: &str, limit: i64) -> CommandR
 
     let rows = stmt
         .query_map(params![status, limit], |row| db_task_from_row(row, 0))
+        .map_err(to_internal_error)?;
+
+    rows.map(|row| row.map(Task::from))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_internal_error)
+}
+
+fn list_today_pickup_tasks(conn: &Connection, limit: i64) -> CommandResult<Vec<Task>> {
+    let local_today = local_today_date(conn)?;
+    list_today_pickup_tasks_for_date(conn, limit, &local_today)
+}
+
+fn local_today_date(conn: &Connection) -> CommandResult<String> {
+    conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))
+        .map_err(to_internal_error)
+}
+
+fn list_today_pickup_tasks_for_date(
+    conn: &Connection,
+    limit: i64,
+    local_today: &str,
+) -> CommandResult<Vec<Task>> {
+    let limit = validate_limit(limit)?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                id, title, description, kind, status, priority, pickup_date,
+                next_action, sort_order, created_at, updated_at, completed_at,
+                archived_at
+            FROM tasks
+            WHERE status = ?1
+            ORDER BY
+                CASE
+                    WHEN pickup_date IS NOT NULL AND pickup_date <= ?2 THEN 0
+                    ELSE 1
+                END ASC,
+                CASE
+                    WHEN pickup_date IS NOT NULL AND pickup_date <= ?2 THEN pickup_date
+                    ELSE NULL
+                END ASC,
+                priority DESC,
+                updated_at DESC,
+                sort_order ASC
+            LIMIT ?3
+            "#,
+        )
+        .map_err(to_internal_error)?;
+
+    let rows = stmt
+        .query_map(params![TASK_STATUS_PICKUP, local_today, limit], |row| {
+            db_task_from_row(row, 0)
+        })
+        .map_err(to_internal_error)?;
+
+    rows.map(|row| row.map(Task::from))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_internal_error)
+}
+
+fn list_today_backlog_tasks(conn: &Connection, limit: i64) -> CommandResult<Vec<Task>> {
+    let limit = validate_limit(limit)?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                id, title, description, kind, status, priority, pickup_date,
+                next_action, sort_order, created_at, updated_at, completed_at,
+                archived_at
+            FROM tasks
+            WHERE status = ?1 AND kind = ?2
+            ORDER BY priority DESC, updated_at DESC, sort_order ASC
+            LIMIT ?3
+            "#,
+        )
+        .map_err(to_internal_error)?;
+
+    let rows = stmt
+        .query_map(
+            params![TASK_STATUS_BACKLOG, TASK_KIND_LONG_TERM, limit],
+            |row| db_task_from_row(row, 0),
+        )
         .map_err(to_internal_error)?;
 
     rows.map(|row| row.map(Task::from))
@@ -1626,6 +1708,50 @@ mod tests {
         }
     }
 
+    fn task_fixture(
+        id: &str,
+        title: &str,
+        kind: &str,
+        status: &str,
+        priority: i64,
+        pickup_date: Option<&str>,
+        updated_at: &str,
+        sort_order: i64,
+    ) -> DbTask {
+        DbTask {
+            id: id.to_string(),
+            title: title.to_string(),
+            description: String::new(),
+            kind: kind.to_string(),
+            status: status.to_string(),
+            priority,
+            pickup_date: pickup_date.map(str::to_string),
+            next_action: Some(format!("Next action for {title}")),
+            sort_order,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: updated_at.to_string(),
+            completed_at: None,
+            archived_at: None,
+        }
+    }
+
+    fn session_fixture(id: &str, task_id: &str, started_at: &str, ended_at: &str) -> DbSession {
+        DbSession {
+            id: id.to_string(),
+            task_id: task_id.to_string(),
+            started_at: started_at.to_string(),
+            ended_at: Some(ended_at.to_string()),
+            duration_seconds: Some(900),
+            end_reason: Some(END_REASON_STOPPED.to_string()),
+            progress_note: Some(format!("Progress for {task_id}")),
+            next_action: Some(format!("Resume {task_id}")),
+            lap_duration_seconds: 60,
+            recovered_from_crash: false,
+            created_at: started_at.to_string(),
+            updated_at: ended_at.to_string(),
+        }
+    }
+
     #[test]
     fn create_task_validates_and_returns_predictable_shape() {
         let conn = in_memory_db();
@@ -1655,6 +1781,238 @@ mod tests {
         let invalid_status = create_task(&conn, input).expect_err("invalid initial status");
         assert_eq!(invalid_status.code, "validation");
         assert!(invalid_status.message.contains("New tasks must start"));
+    }
+
+    #[test]
+    fn list_today_orders_active_pickup_recent_threads_and_backlog_preview() {
+        let conn = in_memory_db();
+        let active_task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: active_task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start active session");
+
+        for task in [
+            task_fixture(
+                "pickup-due",
+                "Due pickup",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                0,
+                Some("1900-01-01"),
+                "2026-01-01T00:00:00.000Z",
+                30,
+            ),
+            task_fixture(
+                "pickup-high",
+                "High priority pickup",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                5,
+                None,
+                "2026-02-01T00:00:00.000Z",
+                20,
+            ),
+            task_fixture(
+                "pickup-recent",
+                "Recently touched pickup",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                1,
+                None,
+                "2026-03-01T00:00:00.000Z",
+                10,
+            ),
+        ] {
+            persistence::insert_task(&conn, &task).expect("insert pickup fixture");
+        }
+
+        for task in [
+            task_fixture(
+                "recent-older-task",
+                "Older recent thread",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_COMPLETED,
+                0,
+                None,
+                "2026-04-01T00:00:00.000Z",
+                10,
+            ),
+            task_fixture(
+                "recent-newer-task",
+                "Newer recent thread",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_COMPLETED,
+                0,
+                None,
+                "2026-04-02T00:00:00.000Z",
+                20,
+            ),
+        ] {
+            persistence::insert_task(&conn, &task).expect("insert recent task fixture");
+        }
+        persistence::insert_session(
+            &conn,
+            &session_fixture(
+                "session-older",
+                "recent-older-task",
+                "2026-05-07T10:00:00.000Z",
+                "2026-05-07T10:15:00.000Z",
+            ),
+        )
+        .expect("insert older session");
+        persistence::insert_session(
+            &conn,
+            &session_fixture(
+                "session-newer",
+                "recent-newer-task",
+                "2026-05-08T10:00:00.000Z",
+                "2026-05-08T10:15:00.000Z",
+            ),
+        )
+        .expect("insert newer session");
+
+        persistence::insert_task(
+            &conn,
+            &task_fixture(
+                "backlog-pickup",
+                "Pickup parked in backlog",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_BACKLOG,
+                99,
+                None,
+                "2026-05-01T00:00:00.000Z",
+                5,
+            ),
+        )
+        .expect("insert pickup backlog fixture");
+
+        persistence::insert_task(
+            &conn,
+            &task_fixture(
+                "backlog-high",
+                "High priority backlog",
+                TASK_KIND_LONG_TERM,
+                TASK_STATUS_BACKLOG,
+                9,
+                None,
+                "2026-01-01T00:00:00.000Z",
+                10,
+            ),
+        )
+        .expect("insert high priority backlog");
+
+        for index in 0..7 {
+            persistence::insert_task(
+                &conn,
+                &task_fixture(
+                    &format!("backlog-recent-{index}"),
+                    &format!("Recent backlog {index}"),
+                    TASK_KIND_LONG_TERM,
+                    TASK_STATUS_BACKLOG,
+                    0,
+                    None,
+                    &format!("2026-02-0{}T00:00:00.000Z", index + 1),
+                    index + 20,
+                ),
+            )
+            .expect("insert backlog fixture");
+        }
+
+        let today = list_today(&conn).expect("list today");
+
+        assert_eq!(
+            today
+                .active_session
+                .as_ref()
+                .expect("active work is first-class in today payload")
+                .task
+                .id,
+            active_task.id
+        );
+        assert_eq!(
+            today
+                .pickup
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pickup-due", "pickup-high", "pickup-recent"]
+        );
+        assert_eq!(
+            today
+                .recent_threads
+                .iter()
+                .map(|thread| thread.task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recent-newer-task", "recent-older-task"]
+        );
+        assert_eq!(today.backlog.len(), 6);
+        assert_eq!(today.backlog[0].id, "backlog-high");
+        assert_eq!(today.backlog[1].id, "backlog-recent-6");
+        assert!(!today.backlog.iter().any(|task| task.id == "backlog-pickup"));
+        assert!(!today
+            .backlog
+            .iter()
+            .any(|task| task.id == "backlog-recent-0"));
+    }
+
+    #[test]
+    fn list_today_pickup_due_group_uses_local_today_date() {
+        let conn = in_memory_db();
+        for task in [
+            task_fixture(
+                "pickup-local-today",
+                "Local today pickup",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                0,
+                Some("2026-05-09"),
+                "2026-05-01T00:00:00.000Z",
+                10,
+            ),
+            task_fixture(
+                "pickup-next-local-day",
+                "Next local day pickup",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                99,
+                Some("2026-05-10"),
+                "2026-05-02T00:00:00.000Z",
+                20,
+            ),
+            task_fixture(
+                "pickup-undated",
+                "Undated pickup",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                1,
+                None,
+                "2026-05-03T00:00:00.000Z",
+                30,
+            ),
+        ] {
+            persistence::insert_task(&conn, &task).expect("insert pickup fixture");
+        }
+
+        let may_ninth = list_today_pickup_tasks_for_date(&conn, 10, "2026-05-09")
+            .expect("list pickups for local May 9");
+        assert_eq!(may_ninth[0].id, "pickup-local-today");
+        assert_eq!(may_ninth[1].id, "pickup-next-local-day");
+
+        let may_tenth = list_today_pickup_tasks_for_date(&conn, 10, "2026-05-10")
+            .expect("list pickups for local May 10");
+        assert_eq!(
+            may_tenth
+                .iter()
+                .take(2)
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pickup-local-today", "pickup-next-local-day"]
+        );
     }
 
     #[test]
