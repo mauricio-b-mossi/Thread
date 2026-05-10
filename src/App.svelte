@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { createTask, listToday, startSession } from "./lib/commands";
+  import { completeSession, createTask, listToday, startSession, stopSession, switchTask } from "./lib/commands";
   import type { CreateTaskInput, Task, TaskKind, TodayPayload } from "./lib/types";
   import {
     canStartTask,
@@ -10,6 +10,8 @@
   } from "./lib/todayView.js";
 
   type EntryRoute = "today" | "floating";
+  type LifecycleAction = "complete" | "stop" | "switch";
+  type SessionDestination = "pickup" | "backlog";
 
   const getRoute = (): EntryRoute => {
     if (typeof window === "undefined") {
@@ -41,11 +43,20 @@
   let captureNextAction = $state("");
   let creatingTask = $state(false);
   let startingTaskId = $state<string | null>(null);
+  let endingAction = $state<LifecycleAction | null>(null);
+  let switchingTaskId = $state<string | null>(null);
+  let activeLifecycleTaskId = $state<string | null>(null);
+  let sessionProgressNote = $state("");
+  let sessionNextAction = $state("");
+  let sessionDestination = $state<SessionDestination>("pickup");
+  let confirmLongTermCompletion = $state(false);
   let feedbackMessage = $state("");
   let errorMessage = $state("");
 
   const todayView = $derived(createTodayViewModel(todayPayload));
-  const hasActiveTask = $derived(Boolean(todayPayload.activeSession));
+  const activeSession = $derived(todayPayload.activeSession);
+  const hasActiveTask = $derived(Boolean(activeSession));
+  const activeTaskIsLongTerm = $derived(activeSession?.task.kind === "long_term");
 
   const updateRoute = () => {
     route = getRoute();
@@ -75,6 +86,26 @@
       loadingToday = false;
     }
   };
+
+  const defaultSessionDestination = (task?: Task): SessionDestination =>
+    task?.kind === "long_term" ? "backlog" : "pickup";
+
+  const resetLifecycleInputs = (task?: Task) => {
+    sessionProgressNote = "";
+    sessionNextAction = "";
+    sessionDestination = defaultSessionDestination(task);
+    confirmLongTermCompletion = false;
+  };
+
+  $effect(() => {
+    const activeTask = activeSession?.task;
+    const activeTaskId = activeTask?.id ?? null;
+
+    if (activeTaskId !== activeLifecycleTaskId) {
+      activeLifecycleTaskId = activeTaskId;
+      resetLifecycleInputs(activeTask);
+    }
+  });
 
   const handleCaptureSubmit = (event: SubmitEvent) => {
     event.preventDefault();
@@ -108,12 +139,42 @@
   };
 
   const beginTask = async (task: Task) => {
-    if (!canStartTask(task) || hasActiveTask) {
+    if (!canStartTask(task)) {
       return;
     }
 
     feedbackMessage = "";
     errorMessage = "";
+
+    if (activeSession) {
+      if (activeSession.task.id === task.id) {
+        return;
+      }
+
+      if (!validateLifecycleInput("switch")) {
+        return;
+      }
+
+      switchingTaskId = task.id;
+
+      try {
+        await switchTask({
+          taskId: task.id,
+          progressNote: sessionProgressNote,
+          nextAction: sessionNextAction,
+          destinationStatus: sessionDestination
+        });
+        feedbackMessage = `Switched to ${task.title}.`;
+        resetLifecycleInputs();
+        await refreshToday();
+      } catch (error) {
+        errorMessage = getErrorMessage(error, "Task could not be switched.");
+      } finally {
+        switchingTaskId = null;
+      }
+      return;
+    }
+
     startingTaskId = task.id;
 
     try {
@@ -127,19 +188,95 @@
     }
   };
 
+  const validateLifecycleInput = (action: LifecycleAction) => {
+    if (!activeSession) {
+      errorMessage = "No active session.";
+      return false;
+    }
+
+    if (activeTaskIsLongTerm && (action === "stop" || action === "switch")) {
+      if (!sessionProgressNote.trim()) {
+        errorMessage = "Add a progress note before stopping or switching a long-term task.";
+        return false;
+      }
+
+      if (!sessionNextAction.trim()) {
+        errorMessage = "Add a next action before stopping or switching a long-term task.";
+        return false;
+      }
+    }
+
+    if (activeTaskIsLongTerm && action === "complete" && !confirmLongTermCompletion) {
+      errorMessage = "Confirm completion before completing a long-term task.";
+      return false;
+    }
+
+    return true;
+  };
+
+  const endActiveSession = async (action: Exclude<LifecycleAction, "switch">) => {
+    feedbackMessage = "";
+    errorMessage = "";
+
+    if (!validateLifecycleInput(action)) {
+      return;
+    }
+
+    endingAction = action;
+
+    try {
+      if (action === "complete") {
+        await completeSession({
+          sessionId: activeSession?.session.id,
+          progressNote: sessionProgressNote,
+          nextAction: sessionNextAction,
+          confirmLongTermCompletion
+        });
+        feedbackMessage = "Session completed.";
+      } else {
+        await stopSession({
+          sessionId: activeSession?.session.id,
+          progressNote: sessionProgressNote,
+          nextAction: sessionNextAction,
+          destinationStatus: sessionDestination
+        });
+        feedbackMessage = "Session stopped.";
+      }
+
+      resetLifecycleInputs();
+      await refreshToday();
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Session could not be updated.");
+    } finally {
+      endingAction = null;
+    }
+  };
+
   const canUseStartButton = (canStart: boolean, taskId: string) =>
-    canStart && !hasActiveTask && startingTaskId !== taskId;
+    canStart &&
+    activeSession?.task.id !== taskId &&
+    startingTaskId !== taskId &&
+    switchingTaskId !== taskId &&
+    endingAction === null;
 
   const startButtonLabel = (canStart: boolean, taskId: string) => {
     if (!canStart) {
       return "Closed";
     }
 
+    if (switchingTaskId === taskId) {
+      return "Switching";
+    }
+
     if (startingTaskId === taskId) {
       return "Starting";
     }
 
-    return hasActiveTask ? "Stop first" : "Start";
+    if (activeSession?.task.id === taskId) {
+      return "Active";
+    }
+
+    return hasActiveTask ? "Switch" : "Start";
   };
 
   onMount(() => {
@@ -182,7 +319,7 @@
 
     {#if todayView.active}
       <section class="active-thread" aria-label="Active work">
-        <div>
+        <div class="active-summary">
           <p class="section-kicker">Active now</p>
           <h2>{todayView.active.title}</h2>
           {#if todayView.active.nextAction}
@@ -190,6 +327,46 @@
           {/if}
           <p class="metadata">{todayView.active.metadata}</p>
         </div>
+        <form class="session-controls" onsubmit={(event) => event.preventDefault()}>
+          <label>
+            <span>Progress note{activeTaskIsLongTerm ? " required to stop or switch" : ""}</span>
+            <textarea bind:value={sessionProgressNote} name="progress-note" rows="2"></textarea>
+          </label>
+          <label>
+            <span>Next action{activeTaskIsLongTerm ? " required to stop or switch" : ""}</span>
+            <input bind:value={sessionNextAction} name="session-next-action" autocomplete="off" />
+          </label>
+          <label>
+            <span>Return to</span>
+            <select bind:value={sessionDestination} name="destination-status">
+              <option value="pickup">Pickup</option>
+              <option value="backlog">Backlog</option>
+            </select>
+          </label>
+          {#if activeTaskIsLongTerm}
+            <label class="checkbox-label">
+              <input bind:checked={confirmLongTermCompletion} type="checkbox" />
+              <span>Confirm long-term task is complete</span>
+            </label>
+          {/if}
+          <div class="session-actions">
+            <button
+              class="quiet-button"
+              type="button"
+              disabled={endingAction !== null || switchingTaskId !== null}
+              onclick={() => void endActiveSession("stop")}
+            >
+              {endingAction === "stop" ? "Stopping" : "Stop"}
+            </button>
+            <button
+              type="button"
+              disabled={endingAction !== null || switchingTaskId !== null}
+              onclick={() => void endActiveSession("complete")}
+            >
+              {endingAction === "complete" ? "Completing" : "Complete"}
+            </button>
+          </div>
+        </form>
       </section>
     {/if}
 
