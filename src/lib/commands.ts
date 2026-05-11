@@ -9,11 +9,13 @@ import type {
   ExportDatabaseInput,
   ExportDatabaseResult,
   GetActiveSessionResult,
+  GetPendingSessionRecoveryResult,
   GetSettingsResult,
   ListBacklogResult,
   ListRecentThreadsInput,
   ListRecentThreadsResult,
   ListTodayResult,
+  OpenTodayWindowResult,
   OpenDataFolderResult,
   ResolveSessionRecoveryInput,
   ResolveSessionRecoveryResult,
@@ -54,6 +56,9 @@ export const startSession = (input: StartSessionInput): Promise<StartSessionResu
 export const getActiveSession = (): Promise<GetActiveSessionResult> =>
   invoke("getActiveSession");
 
+export const getPendingSessionRecovery = (): Promise<GetPendingSessionRecoveryResult> =>
+  invoke("getPendingSessionRecovery");
+
 export const completeSession = (
   input: CompleteSessionInput = {}
 ): Promise<CompleteSessionResult> => invoke("completeSession", { input });
@@ -84,3 +89,6 @@ export const exportDatabase = (
 
 export const openDataFolder = (): Promise<OpenDataFolderResult> =>
   invoke("openDataFolder");
+
+export const openTodayWindow = (): Promise<OpenTodayWindowResult> =>
+  invoke("openTodayWindow");

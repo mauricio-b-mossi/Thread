@@ -5,8 +5,11 @@
   import {
     completeSession,
     createTask,
+    getPendingSessionRecovery,
     getSettings,
     listToday,
+    openTodayWindow,
+    resolveSessionRecovery,
     saveFloatingWindowPosition,
     startSession,
     stopSession,
@@ -22,7 +25,15 @@
     isFloatingWindowDrag,
     shouldOpenFloatingWindowMenuOnPointerUp
   } from "./lib/floatingWindow.js";
-  import type { CreateTaskInput, Settings, Task, TaskKind, TodayPayload } from "./lib/types";
+  import type {
+    ActiveSession,
+    CreateTaskInput,
+    RecoveryAction,
+    Settings,
+    Task,
+    TaskKind,
+    TodayPayload
+  } from "./lib/types";
   import {
     canStartTask,
     createEmptyTodayPayload,
@@ -81,6 +92,10 @@
   let floatingPointerStart = $state<{ x: number; y: number } | null>(null);
   let floatingDragStarted = $state(false);
   let donutNowMs = $state(Date.now());
+  let recoverySession = $state<ActiveSession | null>(null);
+  let recoveryProgressNote = $state("");
+  let recoveryNextAction = $state("");
+  let resolvingRecoveryAction = $state<RecoveryAction | null>(null);
 
   const todayView = $derived(createTodayViewModel(todayPayload));
   const activeSession = $derived(todayPayload.activeSession);
@@ -119,11 +134,28 @@
     errorMessage = "";
 
     try {
-      todayPayload = await listToday();
+      const payload = await listToday();
+      todayPayload = payload;
+      return payload;
     } catch (error) {
       errorMessage = getErrorMessage(error, "Today could not load.");
+      return null;
     } finally {
       loadingToday = false;
+    }
+  };
+
+  const initializeApp = async () => {
+    await refreshToday();
+    void refreshSettings();
+
+    if (route === "today") {
+      try {
+        const pendingRecovery = await getPendingSessionRecovery();
+        recoverySession = pendingRecovery.activeSession;
+      } catch (error) {
+        errorMessage = getErrorMessage(error, "Session recovery could not load.");
+      }
     }
   };
 
@@ -349,6 +381,67 @@
     return hasActiveTask ? "Switch" : "Start";
   };
 
+  const showTodayWindow = async () => {
+    floatingMenuOpen = false;
+    errorMessage = "";
+
+    try {
+      await openTodayWindow();
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Today could not be opened.");
+    }
+  };
+
+  const completeFromFloatingMenu = async () => {
+    floatingMenuOpen = false;
+
+    if (activeTaskIsLongTerm) {
+      await showTodayWindow();
+      return;
+    }
+
+    await endActiveSession("complete");
+  };
+
+  const resolveRecovery = async (action: RecoveryAction) => {
+    if (!recoverySession) {
+      return;
+    }
+
+    feedbackMessage = "";
+    errorMessage = "";
+
+    if (action === "stop" && !recoveryProgressNote.trim()) {
+      errorMessage = "Add a recovery note before stopping the previous session.";
+      return;
+    }
+
+    resolvingRecoveryAction = action;
+
+    try {
+      await resolveSessionRecovery({
+        action,
+        sessionId: recoverySession.session.id,
+        progressNote: recoveryProgressNote,
+        nextAction: recoveryNextAction
+      });
+      recoverySession = null;
+      recoveryProgressNote = "";
+      recoveryNextAction = "";
+      feedbackMessage =
+        action === "resume"
+          ? "Session resumed."
+          : action === "discard"
+            ? "Session discarded."
+            : "Session stopped.";
+      await refreshToday();
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Session recovery could not be resolved.");
+    } finally {
+      resolvingRecoveryAction = null;
+    }
+  };
+
   const handleFloatingPointerDown = (event: PointerEvent) => {
     if (event.button !== 0) {
       return;
@@ -399,11 +492,20 @@
   };
 
   onMount(() => {
-    void refreshToday();
-    void refreshSettings();
+    void initializeApp();
 
     if (route !== "floating") {
-      return;
+      let removeSessionListener: (() => void) | null = null;
+
+      void listen("session-changed", () => {
+        void refreshToday();
+      }).then((unlisten) => {
+        removeSessionListener = unlisten;
+      });
+
+      return () => {
+        removeSessionListener?.();
+      };
     }
 
     const appWindow = getCurrentWindow();
@@ -496,15 +598,86 @@
     {/if}
     {#if floatingMenuOpen}
       <div class="floating-menu" role="menu" aria-label="Floating task actions">
-        <button type="button" role="menuitem" onclick={() => void refreshToday()}>Refresh</button>
         <button type="button" role="menuitem" onclick={() => (floatingMenuOpen = false)}>
-          Dismiss
+          Continue
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!activeSession || endingAction !== null}
+          onclick={() => void completeFromFloatingMenu()}
+        >
+          Complete
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!activeSession}
+          onclick={() => void showTodayWindow()}
+        >
+          Stop/Pause
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!activeSession}
+          onclick={() => void showTodayWindow()}
+        >
+          Switch Task
+        </button>
+        <button type="button" role="menuitem" onclick={() => void showTodayWindow()}>
+          Open Today
         </button>
       </div>
     {/if}
   </main>
 {:else}
   <main class="today-shell" aria-label="Thread Today">
+    {#if recoverySession}
+      <div class="recovery-panel" role="dialog" aria-modal="true" aria-label="Recover session">
+        <div class="recovery-card">
+          <div class="active-summary">
+            <p class="section-kicker">Recovery</p>
+            <h2>{recoverySession.task.title}</h2>
+            <p class="metadata">Unfinished session from {recoverySession.session.startedAt}</p>
+          </div>
+          <label>
+            <span>Recovery note</span>
+            <textarea bind:value={recoveryProgressNote} rows="3"></textarea>
+          </label>
+          <label>
+            <span>Next action</span>
+            <input bind:value={recoveryNextAction} autocomplete="off" />
+          </label>
+          <div class="session-actions">
+            <button
+              type="button"
+              disabled={resolvingRecoveryAction !== null}
+              onclick={() => void resolveRecovery("resume")}
+            >
+              {resolvingRecoveryAction === "resume" ? "Resuming" : "Resume"}
+            </button>
+            <button
+              class="quiet-button"
+              type="button"
+              disabled={resolvingRecoveryAction !== null}
+              onclick={() => void resolveRecovery("stop")}
+            >
+              {resolvingRecoveryAction === "stop" ? "Stopping" : "Stop and write note"}
+            </button>
+            <button
+              class="quiet-button"
+              type="button"
+              disabled={resolvingRecoveryAction !== null}
+              onclick={() => void resolveRecovery("discard")}
+            >
+              {resolvingRecoveryAction === "discard" ? "Discarding" : "Discard"}
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     <header class="today-header">
       <div>
         <p class="app-name">Thread</p>
