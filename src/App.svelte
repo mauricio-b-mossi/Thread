@@ -1,6 +1,20 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
-  import { completeSession, createTask, listToday, startSession, stopSession, switchTask } from "./lib/commands";
+  import {
+    completeSession,
+    createTask,
+    listToday,
+    saveFloatingWindowPosition,
+    startSession,
+    stopSession,
+    switchTask
+  } from "./lib/commands";
+  import {
+    isFloatingWindowDrag,
+    shouldOpenFloatingWindowMenuOnPointerUp
+  } from "./lib/floatingWindow.js";
   import type { CreateTaskInput, Task, TaskKind, TodayPayload } from "./lib/types";
   import {
     canStartTask,
@@ -52,6 +66,9 @@
   let confirmLongTermCompletion = $state(false);
   let feedbackMessage = $state("");
   let errorMessage = $state("");
+  let floatingMenuOpen = $state(false);
+  let floatingPointerStart = $state<{ x: number; y: number } | null>(null);
+  let floatingDragStarted = $state(false);
 
   const todayView = $derived(createTodayViewModel(todayPayload));
   const activeSession = $derived(todayPayload.activeSession);
@@ -279,20 +296,137 @@
     return hasActiveTask ? "Switch" : "Start";
   };
 
+  const handleFloatingPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    floatingPointerStart = { x: event.clientX, y: event.clientY };
+    floatingDragStarted = false;
+  };
+
+  const handleFloatingPointerMove = (event: PointerEvent) => {
+    if (!floatingPointerStart || floatingDragStarted) {
+      return;
+    }
+
+    if (!isFloatingWindowDrag(floatingPointerStart, { x: event.clientX, y: event.clientY })) {
+      return;
+    }
+
+    floatingDragStarted = true;
+    floatingMenuOpen = false;
+    void getCurrentWindow().startDragging();
+  };
+
+  const handleFloatingPointerUp = (event: PointerEvent) => {
+    if (!floatingPointerStart) {
+      return;
+    }
+
+    const pointerEnd = { x: event.clientX, y: event.clientY };
+    const wasDragging = floatingDragStarted;
+    const shouldOpenMenu = shouldOpenFloatingWindowMenuOnPointerUp(
+      floatingPointerStart,
+      pointerEnd,
+      wasDragging
+    );
+    floatingPointerStart = null;
+
+    if (wasDragging) {
+      floatingDragStarted = false;
+      return;
+    }
+
+    if (shouldOpenMenu) {
+      floatingMenuOpen = !floatingMenuOpen;
+    }
+
+    floatingDragStarted = false;
+  };
+
   onMount(() => {
     void refreshToday();
+
+    if (route !== "floating") {
+      return;
+    }
+
+    const appWindow = getCurrentWindow();
+    let savePositionTimer: ReturnType<typeof setTimeout> | null = null;
+    let removeMoveListener: (() => void) | null = null;
+    let removeSessionListener: (() => void) | null = null;
+
+    void appWindow.onMoved(({ payload }) => {
+      if (savePositionTimer) {
+        clearTimeout(savePositionTimer);
+      }
+
+      savePositionTimer = setTimeout(() => {
+        void saveFloatingWindowPosition({ position: { x: payload.x, y: payload.y } });
+      }, 200);
+    }).then((unlisten) => {
+      removeMoveListener = unlisten;
+    });
+
+    void listen("session-changed", () => {
+      void refreshToday();
+    }).then((unlisten) => {
+      removeSessionListener = unlisten;
+    });
+
+    return () => {
+      if (savePositionTimer) {
+        clearTimeout(savePositionTimer);
+      }
+
+      removeMoveListener?.();
+      removeSessionListener?.();
+    };
   });
 </script>
 
 <svelte:window onhashchange={updateRoute} onpopstate={updateRoute} />
 
 {#if route === "floating"}
-  <main class="floating-shell" aria-label="Thread floating window">
+  <main
+    class="floating-shell"
+    aria-label="Thread floating window"
+    onpointerdown={handleFloatingPointerDown}
+    onpointermove={handleFloatingPointerMove}
+    onpointerup={handleFloatingPointerUp}
+    onpointercancel={() => {
+      floatingPointerStart = null;
+      floatingDragStarted = false;
+    }}
+  >
     <div class="floating-bar">
       <span class="status-dot"></span>
       <span>Thread</span>
     </div>
-    <p>Floating capture placeholder</p>
+    {#if todayView.active}
+      <section class="floating-task" aria-label="Active task">
+        <div class="floating-copy">
+          <h1>{todayView.active.title}</h1>
+          {#if todayView.active.nextAction}
+            <p>{todayView.active.nextAction}</p>
+          {/if}
+        </div>
+        <div class="donut-area" aria-label="Focus donut">
+          <span></span>
+        </div>
+      </section>
+    {:else}
+      <p class="floating-empty">No active task</p>
+    {/if}
+    {#if floatingMenuOpen}
+      <div class="floating-menu" role="menu" aria-label="Floating task actions">
+        <button type="button" role="menuitem" onclick={() => void refreshToday()}>Refresh</button>
+        <button type="button" role="menuitem" onclick={() => (floatingMenuOpen = false)}>
+          Dismiss
+        </button>
+      </div>
+    {/if}
   </main>
 {:else}
   <main class="today-shell" aria-label="Thread Today">

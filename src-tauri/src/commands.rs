@@ -8,7 +8,9 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindowBuilder,
+};
 
 type CommandResult<T> = Result<T, CommandError>;
 
@@ -41,6 +43,9 @@ const SETTING_LONG_TERM_STOP_REQUIREMENTS: &str = "long_term.stop_requirements";
 const SETTING_TODAY_RETURN_BEHAVIOR: &str = "today.return_behavior";
 const EXPORT_DIR_NAME: &str = "exports";
 const EXPORT_FILE_EXTENSION: &str = ".sqlite3";
+const FLOATING_WINDOW_WIDTH: f64 = 280.0;
+const FLOATING_WINDOW_HEIGHT: f64 = 140.0;
+const FLOATING_WINDOW_MARGIN: i32 = 24;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -433,22 +438,47 @@ fn open_connection(app: &AppHandle) -> CommandResult<Connection> {
 }
 
 fn open_floating_session_window(app: &AppHandle) -> CommandResult<()> {
+    let settings = get_settings(&open_connection(app)?)?;
+    let position = floating_window_start_position(app, &settings)?;
+
     if let Some(window) = app.get_webview_window("floating") {
+        window
+            .set_always_on_top(true)
+            .map_err(to_internal_error)?;
+        window
+            .set_position(Position::Physical(PhysicalPosition::new(
+                position.x, position.y,
+            )))
+            .map_err(to_internal_error)?;
         window.show().map_err(to_internal_error)?;
         window.set_focus().map_err(to_internal_error)?;
+        window
+            .emit("session-changed", ())
+            .map_err(to_internal_error)?;
     } else {
-        WebviewWindowBuilder::new(
+        let logical_x = f64::from(position.x) / primary_monitor_scale_factor(app)?;
+        let logical_y = f64::from(position.y) / primary_monitor_scale_factor(app)?;
+        let window = WebviewWindowBuilder::new(
             app,
             "floating",
             WebviewUrl::App("index.html#/floating".into()),
         )
         .title("Thread")
-        .inner_size(360.0, 180.0)
-        .min_inner_size(280.0, 120.0)
+        .inner_size(FLOATING_WINDOW_WIDTH, FLOATING_WINDOW_HEIGHT)
+        .min_inner_size(FLOATING_WINDOW_WIDTH, 120.0)
+        .max_inner_size(FLOATING_WINDOW_WIDTH, 160.0)
+        .position(logical_x, logical_y)
         .resizable(false)
-        .always_on_top(get_settings(&open_connection(app)?)?.floating_window_always_on_top)
+        .decorations(false)
+        .shadow(true)
+        .always_on_top(true)
         .build()
         .map_err(to_internal_error)?;
+        window
+            .set_position(Position::Physical(PhysicalPosition::new(
+                position.x, position.y,
+            )))
+            .map_err(to_internal_error)?;
     }
 
     if let Some(today) = app.get_webview_window("today") {
@@ -456,6 +486,43 @@ fn open_floating_session_window(app: &AppHandle) -> CommandResult<()> {
     }
 
     Ok(())
+}
+
+fn floating_window_start_position(
+    app: &AppHandle,
+    settings: &Settings,
+) -> CommandResult<FloatingWindowPosition> {
+    let default_position = FloatingWindowPosition {
+        x: FLOATING_WINDOW_MARGIN,
+        y: FLOATING_WINDOW_MARGIN,
+    };
+
+    if settings.floating_window_position != default_position {
+        return Ok(settings.floating_window_position.clone());
+    }
+
+    let Some(monitor) = app.primary_monitor().map_err(to_internal_error)? else {
+        return Ok(default_position);
+    };
+
+    let work_area = monitor.work_area();
+    let scale_factor = monitor.scale_factor();
+    let width = (FLOATING_WINDOW_WIDTH * scale_factor).round() as i32;
+    let x = work_area.position.x + work_area.size.width as i32 - width - FLOATING_WINDOW_MARGIN;
+    let y = work_area.position.y + FLOATING_WINDOW_MARGIN;
+
+    Ok(FloatingWindowPosition {
+        x: x.max(work_area.position.x),
+        y: y.max(work_area.position.y),
+    })
+}
+
+fn primary_monitor_scale_factor(app: &AppHandle) -> CommandResult<f64> {
+    Ok(app
+        .primary_monitor()
+        .map_err(to_internal_error)?
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(1.0))
 }
 
 fn create_task(conn: &Connection, input: CreateTaskInput) -> CommandResult<Task> {
