@@ -162,6 +162,39 @@ time {
   color: var(--thread-danger);
 }
 
+.settings-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(7rem, 10rem);
+  align-items: end;
+  gap: 0.7rem;
+  border: 1px solid var(--thread-border);
+  border-radius: 8px;
+  background: var(--thread-surface);
+  padding: 0.75rem 0.8rem;
+}
+
+.lap-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.lap-presets button {
+  min-width: 3.25rem;
+  background: var(--thread-surface);
+  color: var(--thread-ink);
+  padding: 0.45rem 0.55rem;
+}
+
+.lap-presets button.active {
+  background: var(--thread-selected);
+}
+
+.lap-presets button:hover:not(:disabled) {
+  background: var(--thread-hover);
+}
+
 .active-thread,
 .today-section,
 .quick-capture-section {
@@ -431,12 +464,26 @@ input[type="checkbox"] {
   background: var(--thread-surface-subtle);
 }
 
-.donut-area span {
-  width: 2.1rem;
-  height: 2.1rem;
-  border: 0.38rem solid var(--thread-border-strong);
-  border-top-color: var(--thread-accent);
-  border-radius: 999px;
+.donut-svg {
+  width: 2.45rem;
+  height: 2.45rem;
+  overflow: visible;
+}
+
+.donut-track,
+.donut-progress {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 6;
+}
+
+.donut-track {
+  stroke: var(--thread-border);
+}
+
+.donut-progress {
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
 }
 
 .floating-menu {
@@ -483,6 +530,10 @@ input[type="checkbox"] {
   }
 
   .session-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-panel {
     grid-template-columns: 1fr;
   }
 

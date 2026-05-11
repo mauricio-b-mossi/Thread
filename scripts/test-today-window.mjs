@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import {
+  calculateDonutLap,
   classifyFloatingWindowPointerGesture,
+  DONUT_COLORS,
+  DONUT_LAP_DURATION_PRESETS_SECONDS,
   FLOATING_WINDOW_DRAG_THRESHOLD_PX,
   isFloatingWindowDrag,
   pointerTravelDistance,
+  renderFloatingWindowSnapshot,
   shouldOpenFloatingWindowMenuOnPointerUp
 } from "../src/lib/floatingWindow.js";
 import {
@@ -149,5 +153,38 @@ assert.equal(
   shouldOpenFloatingWindowMenuOnPointerUp({ x: 100, y: 100 }, { x: 107, y: 100 }, false),
   false
 );
+
+assert.deepEqual(DONUT_LAP_DURATION_PRESETS_SECONDS, [30, 60, 90, 120]);
+
+const firstLap = calculateDonutLap(
+  "2026-05-09T12:00:00.000Z",
+  "2026-05-09T12:00:15.000Z",
+  60
+);
+assert.equal(firstLap.lapIndex, 0);
+assert.equal(firstLap.progress, 0.25);
+assert.equal(firstLap.color, DONUT_COLORS[0]);
+
+const secondLap = calculateDonutLap(
+  "2026-05-09T12:00:00.000Z",
+  "2026-05-09T12:01:15.000Z",
+  60
+);
+assert.equal(secondLap.lapIndex, 1);
+assert.equal(secondLap.progress, 0.25);
+assert.equal(secondLap.color, DONUT_COLORS[1]);
+
+const wrappedPaletteLap = calculateDonutLap(
+  "2026-05-09T12:00:00.000Z",
+  "2026-05-09T12:04:30.000Z",
+  60
+);
+assert.equal(wrappedPaletteLap.lapIndex, 4);
+assert.equal(wrappedPaletteLap.progress, 0.5);
+assert.equal(wrappedPaletteLap.color, DONUT_COLORS[0]);
+
+const floatingSnapshot = renderFloatingWindowSnapshot(payload.activeSession);
+assert.deepEqual(floatingSnapshot, ["Active migration", "Write the first paragraph"]);
+assert(!floatingSnapshot.some((line) => /\d+:\d+|\b\d+\s*(s|sec|seconds|min|minutes)\b/i.test(line)));
 
 console.log("Today window behavior tests passed.");
