@@ -5,17 +5,24 @@
   import {
     completeSession,
     createTask,
+    getSettings,
     listToday,
     saveFloatingWindowPosition,
     startSession,
     stopSession,
-    switchTask
+    switchTask,
+    updateSettings
   } from "./lib/commands";
   import {
+    calculateDonutLap,
+    clampDonutLapDurationSeconds,
+    DONUT_LAP_DURATION_PRESETS_SECONDS,
+    DONUT_MAX_LAP_DURATION_SECONDS,
+    DONUT_MIN_LAP_DURATION_SECONDS,
     isFloatingWindowDrag,
     shouldOpenFloatingWindowMenuOnPointerUp
   } from "./lib/floatingWindow.js";
-  import type { CreateTaskInput, Task, TaskKind, TodayPayload } from "./lib/types";
+  import type { CreateTaskInput, Settings, Task, TaskKind, TodayPayload } from "./lib/types";
   import {
     canStartTask,
     createEmptyTodayPayload,
@@ -66,14 +73,30 @@
   let confirmLongTermCompletion = $state(false);
   let feedbackMessage = $state("");
   let errorMessage = $state("");
+  let settings = $state<Settings | null>(null);
+  let settingsOpen = $state(false);
+  let savingSettings = $state(false);
+  let customLapDuration = $state("60");
   let floatingMenuOpen = $state(false);
   let floatingPointerStart = $state<{ x: number; y: number } | null>(null);
   let floatingDragStarted = $state(false);
+  let donutNowMs = $state(Date.now());
 
   const todayView = $derived(createTodayViewModel(todayPayload));
   const activeSession = $derived(todayPayload.activeSession);
   const hasActiveTask = $derived(Boolean(activeSession));
   const activeTaskIsLongTerm = $derived(activeSession?.task.kind === "long_term");
+  const selectedLapDuration = $derived(settings?.donutLapDurationSeconds ?? 60);
+  const donutLap = $derived(
+    activeSession
+      ? calculateDonutLap(
+          activeSession.session.startedAt,
+          donutNowMs,
+          activeSession.session.lapDurationSeconds || selectedLapDuration
+        )
+      : null
+  );
+  const donutRadius = 18;
 
   const updateRoute = () => {
     route = getRoute();
@@ -102,6 +125,36 @@
     } finally {
       loadingToday = false;
     }
+  };
+
+  const refreshSettings = async () => {
+    try {
+      settings = await getSettings();
+      customLapDuration = String(settings.donutLapDurationSeconds);
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Settings could not load.");
+    }
+  };
+
+  const saveLapDuration = async (value: number) => {
+    feedbackMessage = "";
+    errorMessage = "";
+    savingSettings = true;
+
+    try {
+      const nextDuration = clampDonutLapDurationSeconds(value);
+      settings = await updateSettings({ donutLapDurationSeconds: nextDuration });
+      customLapDuration = String(settings.donutLapDurationSeconds);
+      feedbackMessage = "Settings updated.";
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Settings could not be updated.");
+    } finally {
+      savingSettings = false;
+    }
+  };
+
+  const saveCustomLapDuration = () => {
+    void saveLapDuration(Number(customLapDuration));
   };
 
   const defaultSessionDestination = (task?: Task): SessionDestination =>
@@ -347,15 +400,23 @@
 
   onMount(() => {
     void refreshToday();
+    void refreshSettings();
 
     if (route !== "floating") {
       return;
     }
 
     const appWindow = getCurrentWindow();
+    let animationFrame = 0;
     let savePositionTimer: ReturnType<typeof setTimeout> | null = null;
     let removeMoveListener: (() => void) | null = null;
     let removeSessionListener: (() => void) | null = null;
+
+    const tickDonut = () => {
+      donutNowMs = Date.now();
+      animationFrame = requestAnimationFrame(tickDonut);
+    };
+    animationFrame = requestAnimationFrame(tickDonut);
 
     void appWindow.onMoved(({ payload }) => {
       if (savePositionTimer) {
@@ -380,6 +441,7 @@
         clearTimeout(savePositionTimer);
       }
 
+      cancelAnimationFrame(animationFrame);
       removeMoveListener?.();
       removeSessionListener?.();
     };
@@ -413,7 +475,20 @@
           {/if}
         </div>
         <div class="donut-area" aria-label="Focus donut">
-          <span></span>
+          {#if donutLap}
+            <svg class="donut-svg" viewBox="0 0 48 48" aria-hidden="true">
+              <circle class="donut-track" cx="24" cy="24" r={donutRadius}></circle>
+              <circle
+                class="donut-progress"
+                cx="24"
+                cy="24"
+                r={donutRadius}
+                pathLength="1"
+                stroke={donutLap.color}
+                stroke-dasharray={`${donutLap.progress} ${1 - donutLap.progress}`}
+              ></circle>
+            </svg>
+          {/if}
         </div>
       </section>
     {:else}
@@ -437,9 +512,51 @@
       </div>
       <div class="header-actions">
         <time datetime={todayIso}>{todayLabel}</time>
-        <button class="quiet-button" type="button" aria-label="Settings">Settings</button>
+        <button
+          class="quiet-button"
+          type="button"
+          aria-label="Settings"
+          aria-expanded={settingsOpen}
+          onclick={() => (settingsOpen = !settingsOpen)}
+        >
+          Settings
+        </button>
       </div>
     </header>
+
+    {#if settingsOpen}
+      <section class="settings-panel" aria-label="Settings">
+        <div>
+          <p class="section-kicker">Donut lap</p>
+          <div class="lap-presets" role="group" aria-label="Preset lap durations">
+            {#each DONUT_LAP_DURATION_PRESETS_SECONDS as duration}
+              <button
+                class:active={selectedLapDuration === duration}
+                type="button"
+                disabled={savingSettings}
+                aria-pressed={selectedLapDuration === duration}
+                onclick={() => void saveLapDuration(duration)}
+              >
+                {duration}s
+              </button>
+            {/each}
+          </div>
+        </div>
+        <label>
+          <span>Custom seconds</span>
+          <input
+            bind:value={customLapDuration}
+            type="number"
+            min={DONUT_MIN_LAP_DURATION_SECONDS}
+            max={DONUT_MAX_LAP_DURATION_SECONDS}
+            step="1"
+            disabled={savingSettings}
+            onblur={saveCustomLapDuration}
+            onchange={saveCustomLapDuration}
+          />
+        </label>
+      </section>
+    {/if}
 
     {#if loadingToday}
       <p class="status-line" aria-live="polite">Loading Today</p>
