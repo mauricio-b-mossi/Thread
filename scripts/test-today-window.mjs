@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
 import {
+  classifyFloatingWindowPointerGesture,
+  FLOATING_WINDOW_DRAG_THRESHOLD_PX,
+  isFloatingWindowDrag,
+  pointerTravelDistance,
+  shouldOpenFloatingWindowMenuOnPointerUp
+} from "../src/lib/floatingWindow.js";
+import {
   canStartTask,
   createEmptyTodayPayload,
   createQuickCaptureInput,
@@ -116,5 +123,31 @@ assert.match(rendered.pickup[0], /Draft launch note/);
 assert.match(rendered.pickup[0], /Write the first paragraph/);
 assert.match(rendered.recentThreads[0], /Outlined the launch sections/);
 assert.match(rendered.backlog[0], /Rework onboarding/);
+
+assert.equal(pointerTravelDistance({ x: 4, y: 8 }, { x: 7, y: 12 }), 5);
+assert.equal(
+  classifyFloatingWindowPointerGesture(
+    { x: 100, y: 100 },
+    { x: 100 + FLOATING_WINDOW_DRAG_THRESHOLD_PX, y: 100 }
+  ),
+  "click"
+);
+assert.equal(isFloatingWindowDrag({ x: 100, y: 100 }, { x: 107, y: 100 }), true);
+assert.equal(
+  classifyFloatingWindowPointerGesture({ x: 100, y: 100 }, { x: 107, y: 100 }),
+  "drag"
+);
+assert.equal(
+  shouldOpenFloatingWindowMenuOnPointerUp({ x: 100, y: 100 }, { x: 102, y: 100 }, false),
+  true
+);
+assert.equal(
+  shouldOpenFloatingWindowMenuOnPointerUp({ x: 100, y: 100 }, { x: 102, y: 100 }, true),
+  false
+);
+assert.equal(
+  shouldOpenFloatingWindowMenuOnPointerUp({ x: 100, y: 100 }, { x: 107, y: 100 }, false),
+  false
+);
 
 console.log("Today window behavior tests passed.");

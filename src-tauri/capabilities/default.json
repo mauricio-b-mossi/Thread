@@ -1,7 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main Thread window",
-  "windows": ["today"],
-  "permissions": []
+  "description": "Default capability for Thread windows",
+  "windows": ["today", "floating"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:window:allow-outer-position",
+    "core:window:allow-start-dragging"
+  ]
 }
