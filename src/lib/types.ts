@@ -133,6 +133,10 @@ export type StartSessionResult = ActiveSession;
 
 export type GetActiveSessionResult = ActiveSession | null;
 
+export interface GetPendingSessionRecoveryResult {
+  activeSession: ActiveSession | null;
+}
+
 export interface CompleteSessionInput {
   sessionId?: string;
   progressNote?: string;
@@ -206,3 +210,5 @@ export interface ExportDatabaseResult {
 export interface OpenDataFolderResult {
   path: string;
 }
+
+export type OpenTodayWindowResult = null;

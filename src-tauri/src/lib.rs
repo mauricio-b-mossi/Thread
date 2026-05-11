@@ -1,3 +1,5 @@
+use tauri::Manager;
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -9,6 +11,7 @@ pub fn run() {
             commands::listRecentThreads,
             commands::startSession,
             commands::getActiveSession,
+            commands::getPendingSessionRecovery,
             commands::completeSession,
             commands::stopSession,
             commands::switchTask,
@@ -17,11 +20,15 @@ pub fn run() {
             commands::updateSettings,
             commands::saveFloatingWindowPosition,
             commands::exportDatabase,
-            commands::openDataFolder
+            commands::openDataFolder,
+            commands::openTodayWindow
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
-            persistence::open_app_database(&app_handle)?;
+            let conn = persistence::open_app_database(&app_handle)?;
+            let pending_recovery = commands::pending_recovery_from_startup(&conn)
+                .map_err(|error| std::io::Error::other(error.message))?;
+            app.manage(pending_recovery);
             Ok(())
         })
         .run(tauri::generate_context!())

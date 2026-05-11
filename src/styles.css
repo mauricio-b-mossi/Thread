@@ -173,6 +173,28 @@ time {
   padding: 0.75rem 0.8rem;
 }
 
+.recovery-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  background: rgb(247 246 243 / 88%);
+  padding: 1rem;
+}
+
+.recovery-card {
+  display: grid;
+  gap: 0.75rem;
+  width: min(100%, 520px);
+  border: 1px solid var(--thread-border);
+  border-radius: 8px;
+  background: var(--thread-surface);
+  box-shadow: 0 14px 36px rgb(55 53 47 / 18%);
+  padding: 0.9rem;
+}
+
 .lap-presets {
   display: flex;
   flex-wrap: wrap;
@@ -491,7 +513,10 @@ input[type="checkbox"] {
   right: 0.55rem;
   bottom: 0.55rem;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.35rem;
+  max-width: calc(100% - 1.1rem);
   border: 1px solid var(--thread-border);
   border-radius: 8px;
   background: var(--thread-surface);

@@ -7,9 +7,11 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
 };
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, State, WebviewUrl,
+    WebviewWindowBuilder,
 };
 
 type CommandResult<T> = Result<T, CommandError>;
@@ -46,6 +48,9 @@ const EXPORT_FILE_EXTENSION: &str = ".sqlite3";
 const FLOATING_WINDOW_WIDTH: f64 = 280.0;
 const FLOATING_WINDOW_HEIGHT: f64 = 140.0;
 const FLOATING_WINDOW_MARGIN: i32 = 24;
+
+#[derive(Debug, Default)]
+pub struct PendingSessionRecovery(pub Mutex<Option<String>>);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +262,12 @@ pub struct ResolveSessionRecoveryResult {
     pub task: Option<Task>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPendingSessionRecoveryResult {
+    pub active_session: Option<ActiveSession>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSettingsInput {
@@ -352,6 +363,15 @@ pub fn getActiveSession(app: AppHandle) -> CommandResult<Option<ActiveSession>> 
 }
 
 #[tauri::command]
+pub fn getPendingSessionRecovery(
+    app: AppHandle,
+    pending_recovery: State<PendingSessionRecovery>,
+) -> CommandResult<GetPendingSessionRecoveryResult> {
+    let conn = open_connection(&app)?;
+    get_pending_session_recovery(&conn, &pending_recovery)
+}
+
+#[tauri::command]
 pub fn completeSession(
     app: AppHandle,
     input: CompleteSessionInput,
@@ -378,9 +398,15 @@ pub async fn switchTask(app: AppHandle, input: SwitchTaskInput) -> CommandResult
 pub fn resolveSessionRecovery(
     app: AppHandle,
     input: ResolveSessionRecoveryInput,
+    pending_recovery: State<PendingSessionRecovery>,
 ) -> CommandResult<ResolveSessionRecoveryResult> {
     let conn = open_connection(&app)?;
-    resolve_session_recovery(&conn, input)
+    let result = resolve_session_recovery(&conn, input)?;
+    clear_pending_session_recovery(&pending_recovery)?;
+    if result.active_session.is_some() {
+        open_floating_session_window(&app)?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -431,6 +457,11 @@ pub fn openDataFolder(app: AppHandle) -> CommandResult<OpenDataFolderResult> {
     Ok(OpenDataFolderResult {
         path: data_dir.to_string_lossy().to_string(),
     })
+}
+
+#[tauri::command]
+pub fn openTodayWindow(app: AppHandle) -> CommandResult<()> {
+    open_today_window(&app)
 }
 
 fn open_connection(app: &AppHandle) -> CommandResult<Connection> {
@@ -523,6 +554,28 @@ fn primary_monitor_scale_factor(app: &AppHandle) -> CommandResult<f64> {
         .map_err(to_internal_error)?
         .map(|monitor| monitor.scale_factor())
         .unwrap_or(1.0))
+}
+
+fn open_today_window(app: &AppHandle) -> CommandResult<()> {
+    if let Some(today) = app.get_webview_window("today") {
+        today.show().map_err(to_internal_error)?;
+        today.set_focus().map_err(to_internal_error)?;
+        today.emit("session-changed", ()).map_err(to_internal_error)?;
+    } else {
+        WebviewWindowBuilder::new(app, "today", WebviewUrl::App("index.html#/today".into()))
+            .title("Thread")
+            .inner_size(720.0, 560.0)
+            .min_inner_size(360.0, 420.0)
+            .resizable(true)
+            .build()
+            .map_err(to_internal_error)?;
+    }
+
+    if let Some(floating) = app.get_webview_window("floating") {
+        floating.hide().map_err(to_internal_error)?;
+    }
+
+    Ok(())
 }
 
 fn create_task(conn: &Connection, input: CreateTaskInput) -> CommandResult<Task> {
@@ -820,6 +873,49 @@ fn get_active_session(conn: &Connection) -> CommandResult<Option<ActiveSession>>
             "Multiple active sessions were found; resolve recovery before continuing.",
         )),
     }
+}
+
+pub fn pending_recovery_from_startup(conn: &Connection) -> CommandResult<PendingSessionRecovery> {
+    let session_id = get_active_session(conn)?.map(|active| active.session.id);
+    Ok(PendingSessionRecovery(Mutex::new(session_id)))
+}
+
+fn get_pending_session_recovery(
+    conn: &Connection,
+    pending_recovery: &PendingSessionRecovery,
+) -> CommandResult<GetPendingSessionRecoveryResult> {
+    let pending_session_id = pending_recovery
+        .0
+        .lock()
+        .map_err(|_| CommandError::internal("Session recovery state could not be read."))?
+        .clone();
+
+    let Some(pending_session_id) = pending_session_id else {
+        return Ok(GetPendingSessionRecoveryResult {
+            active_session: None,
+        });
+    };
+
+    let active_session = match get_active_session(conn)? {
+        Some(active_session) if active_session.session.id == pending_session_id => {
+            Some(active_session)
+        }
+        _ => {
+            clear_pending_session_recovery(pending_recovery)?;
+            None
+        }
+    };
+
+    Ok(GetPendingSessionRecoveryResult { active_session })
+}
+
+fn clear_pending_session_recovery(pending_recovery: &PendingSessionRecovery) -> CommandResult<()> {
+    *pending_recovery
+        .0
+        .lock()
+        .map_err(|_| CommandError::internal("Session recovery state could not be updated."))? =
+        None;
+    Ok(())
 }
 
 fn complete_session(
@@ -2354,6 +2450,39 @@ mod tests {
     }
 
     #[test]
+    fn stopping_pickup_can_return_to_backlog() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start pickup session");
+
+        let stopped = stop_session(
+            &conn,
+            StopSessionInput {
+                session_id: None,
+                progress_note: Some("Paused after triage".to_string()),
+                next_action: Some("Pick this up later".to_string()),
+                destination_status: Some(TASK_STATUS_BACKLOG.to_string()),
+            },
+            END_REASON_STOPPED,
+        )
+        .expect("stop pickup to backlog");
+
+        assert_eq!(stopped.task.status, TASK_STATUS_BACKLOG);
+        assert!(!list_today(&conn)
+            .expect("list today")
+            .pickup
+            .iter()
+            .any(|pickup| pickup.id == task.id));
+    }
+
+    #[test]
     fn switch_task_ends_current_session_and_starts_target() {
         let conn = in_memory_db();
         let first = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("first task");
@@ -2401,6 +2530,196 @@ mod tests {
                 .id,
             switched.session.id
         );
+    }
+
+    #[test]
+    fn switch_task_rejects_long_term_without_required_notes() {
+        let conn = in_memory_db();
+        let first = create_task(&conn, create_input(TASK_KIND_LONG_TERM)).expect("first task");
+        let second = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("second task");
+        let original = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: first.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start long-term session");
+
+        let error = switch_task(
+            &conn,
+            SwitchTaskInput {
+                task_id: second.id.clone(),
+                progress_note: Some("Mapped the next work".to_string()),
+                next_action: None,
+                destination_status: None,
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect_err("long-term switch requires notes");
+
+        assert_eq!(error.code, "validation");
+        assert!(error.message.contains("next action"));
+        let active = get_active_session(&conn)
+            .expect("read active")
+            .expect("session remains active");
+        assert_eq!(active.session.id, original.session.id);
+        assert_eq!(active.task.id, first.id);
+        assert_eq!(
+            require_task(&conn, &second.id)
+                .expect("read target")
+                .status,
+            TASK_STATUS_PICKUP
+        );
+    }
+
+    #[test]
+    fn recovery_resume_marks_session_and_keeps_task_active() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start session");
+
+        let result = resolve_session_recovery(
+            &conn,
+            ResolveSessionRecoveryInput {
+                action: RECOVERY_ACTION_RESUME.to_string(),
+                session_id: Some(active.session.id.clone()),
+                progress_note: None,
+                next_action: None,
+            },
+        )
+        .expect("resume session");
+
+        let resumed = result.active_session.expect("active session returned");
+        assert_eq!(resumed.session.id, active.session.id);
+        assert!(resumed.session.recovered_from_crash);
+        assert_eq!(resumed.session.ended_at, None);
+        assert_eq!(resumed.task.status, TASK_STATUS_ACTIVE);
+    }
+
+    #[test]
+    fn pending_recovery_only_reports_session_present_at_startup() {
+        let conn = in_memory_db();
+        let pending_before_session =
+            pending_recovery_from_startup(&conn).expect("read startup recovery");
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start session after startup");
+
+        assert!(get_pending_session_recovery(&conn, &pending_before_session)
+            .expect("read pending recovery")
+            .active_session
+            .is_none());
+
+        let pending_with_session =
+            pending_recovery_from_startup(&conn).expect("read startup recovery");
+        assert_eq!(
+            get_pending_session_recovery(&conn, &pending_with_session)
+                .expect("read pending recovery")
+                .active_session
+                .expect("startup active session")
+                .session
+                .id,
+            active.session.id
+        );
+
+        clear_pending_session_recovery(&pending_with_session).expect("clear pending recovery");
+        assert!(get_pending_session_recovery(&conn, &pending_with_session)
+            .expect("read cleared pending recovery")
+            .active_session
+            .is_none());
+    }
+
+    #[test]
+    fn recovery_stop_uses_app_closed_and_updates_task() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start session");
+
+        let result = resolve_session_recovery(
+            &conn,
+            ResolveSessionRecoveryInput {
+                action: RECOVERY_ACTION_STOP.to_string(),
+                session_id: Some(active.session.id),
+                progress_note: Some("Recovered after restart".to_string()),
+                next_action: Some("Continue the draft".to_string()),
+            },
+        )
+        .expect("stop recovered session");
+        let session = result.session.expect("stopped session returned");
+        let task = result.task.expect("updated task returned");
+
+        assert_eq!(session.end_reason.as_deref(), Some(END_REASON_APP_CLOSED));
+        assert_eq!(session.progress_note.as_deref(), Some("Recovered after restart"));
+        assert_eq!(task.status, TASK_STATUS_PICKUP);
+        assert_eq!(task.next_action.as_deref(), Some("Continue the draft"));
+        assert!(get_active_session(&conn)
+            .expect("read active")
+            .is_none());
+    }
+
+    #[test]
+    fn recovery_discard_excludes_session_from_recent_threads() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start session");
+
+        let result = resolve_session_recovery(
+            &conn,
+            ResolveSessionRecoveryInput {
+                action: RECOVERY_ACTION_DISCARD.to_string(),
+                session_id: Some(active.session.id.clone()),
+                progress_note: Some("Ignore accidental open".to_string()),
+                next_action: None,
+            },
+        )
+        .expect("discard recovered session");
+        let session = result.session.expect("discarded session returned");
+        let task = result.task.expect("updated task returned");
+
+        assert_eq!(session.end_reason.as_deref(), Some(END_REASON_DISCARDED));
+        assert_eq!(session.duration_seconds, None);
+        assert_eq!(task.status, TASK_STATUS_PICKUP);
+        assert_eq!(
+            require_task(&conn, &active.task.id)
+                .expect("read task after discard")
+                .status,
+            TASK_STATUS_PICKUP
+        );
+        assert!(get_active_session(&conn)
+            .expect("read active")
+            .is_none());
+        assert!(!list_recent_threads(&conn, 10)
+            .expect("list recent threads")
+            .iter()
+            .any(|thread| thread.session.id == active.session.id));
     }
 
     #[test]
