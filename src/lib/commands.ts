@@ -10,6 +10,8 @@ import type {
   ExportDatabaseResult,
   GetActiveSessionResult,
   GetPendingSessionRecoveryResult,
+  GetTaskDetailInput,
+  GetTaskDetailResult,
   GetSettingsResult,
   ListBacklogResult,
   ListRecentThreadsInput,
@@ -54,6 +56,9 @@ export const listBacklog = (): Promise<ListBacklogResult> => invoke("listBacklog
 export const listRecentThreads = (
   input?: ListRecentThreadsInput
 ): Promise<ListRecentThreadsResult> => invoke("listRecentThreads", { input: input ?? null });
+
+export const getTaskDetail = (input: GetTaskDetailInput): Promise<GetTaskDetailResult> =>
+  invoke("getTaskDetail", { input });
 
 export const startSession = (input: StartSessionInput): Promise<StartSessionResult> =>
   invoke("startSession", { input });

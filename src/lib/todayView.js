@@ -2,6 +2,7 @@
 /** @typedef {import("./types").CreateTaskInput} CreateTaskInput */
 /** @typedef {import("./types").RecentThread} RecentThread */
 /** @typedef {import("./types").Task} Task */
+/** @typedef {import("./types").TaskDetail} TaskDetail */
 /** @typedef {import("./types").TaskKind} TaskKind */
 /** @typedef {import("./types").TodayPayload} TodayPayload */
 
@@ -108,6 +109,53 @@ export function renderTodaySnapshot(payload) {
 }
 
 /**
+ * @param {TaskDetail} detail
+ */
+export function createTaskDetailViewModel(detail) {
+  const sessions = detail.sessions.map(createSessionHistoryRow);
+  const progressNotes = sessions.filter((session) => session.progressNote);
+
+  return {
+    task: detail.task,
+    title: detail.task.title,
+    description: detail.task.description,
+    kind: detail.task.kind === "long_term" ? "Long-term" : "Pickup",
+    status: formatStatus(detail.task.status),
+    nextAction: detail.task.nextAction,
+    totalDuration: formatDuration(detail.totalDurationSeconds) ?? "0m",
+    sessions,
+    progressNotes
+  };
+}
+
+/**
+ * @param {TaskDetail} detail
+ */
+export function renderTaskDetailSnapshot(detail) {
+  const model = createTaskDetailViewModel(detail);
+
+  return [
+    model.title,
+    model.description,
+    model.kind,
+    model.status,
+    model.nextAction,
+    model.totalDuration,
+    ...model.sessions.map((session) =>
+      [
+        session.when,
+        session.status,
+        session.duration,
+        session.progressNote,
+        session.nextAction
+      ]
+        .filter(Boolean)
+        .join(" | ")
+    )
+  ].filter(Boolean);
+}
+
+/**
  * @param {Task} task
  */
 function createTaskRow(task) {
@@ -149,6 +197,25 @@ function createRecentThreadRow(thread) {
 }
 
 /**
+ * @param {import("./types").Session} session
+ */
+function createSessionHistoryRow(session) {
+  return {
+    id: session.id,
+    when: session.endedAt
+      ? `Ended ${formatShortDateTime(session.endedAt)}`
+      : `Started ${formatShortDateTime(session.startedAt)}`,
+    status: formatEndReason(session.endReason),
+    duration:
+      session.endReason === "discarded"
+        ? "Discarded / excluded from total"
+        : formatDuration(session.durationSeconds),
+    progressNote: session.progressNote,
+    nextAction: session.nextAction
+  };
+}
+
+/**
  * @param {Task} task
  */
 function formatTaskMetadata(task) {
@@ -167,10 +234,31 @@ function formatTaskMetadata(task) {
 }
 
 /**
+ * @param {string} status
+ */
+function formatStatus(status) {
+  return status
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+/**
+ * @param {string | null} endReason
+ */
+function formatEndReason(endReason) {
+  if (!endReason) {
+    return "Active";
+  }
+
+  return formatStatus(endReason);
+}
+
+/**
  * @param {RecentThread} thread
  */
 function formatRecentThreadMetadata(thread) {
-  const parts = [`Worked ${formatShortDateTime(thread.lastWorkedAt)}`];
+  const parts = [`Worked ${formatRelativeDateTime(thread.lastWorkedAt)}`];
   const duration = formatDuration(thread.durationSeconds);
 
   if (duration) {
@@ -188,6 +276,35 @@ function formatRecentThreadMetadata(thread) {
  */
 function renderRowsOrEmpty(rows, emptyText, renderRow) {
   return rows.length > 0 ? rows.map(renderRow) : [emptyText];
+}
+
+/**
+ * @param {string} value
+ */
+function formatRelativeDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const now = new Date();
+  const localDay = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayDelta = Math.round((today - localDay) / 86400000);
+
+  if (dayDelta === 0) {
+    return "today";
+  }
+
+  if (dayDelta === 1) {
+    return "yesterday";
+  }
+
+  if (dayDelta > 1 && dayDelta <= 30) {
+    return `${dayDelta}d ago`;
+  }
+
+  return formatShortDateTime(value);
 }
 
 /**

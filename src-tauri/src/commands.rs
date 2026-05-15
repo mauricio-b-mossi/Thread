@@ -158,6 +158,14 @@ pub struct RecentThread {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub task: Task,
+    pub sessions: Vec<Session>,
+    pub total_duration_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct FloatingWindowPosition {
     pub x: i32,
     pub y: i32,
@@ -213,6 +221,12 @@ pub struct ArchiveTaskInput {
 #[serde(rename_all = "camelCase")]
 pub struct ListRecentThreadsInput {
     pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GetTaskDetailInput {
+    pub task_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -354,6 +368,12 @@ pub fn listRecentThreads(
     let conn = open_connection(&app)?;
     let limit = input.and_then(|value| value.limit).unwrap_or(10);
     list_recent_threads(&conn, limit)
+}
+
+#[tauri::command]
+pub fn getTaskDetail(app: AppHandle, input: GetTaskDetailInput) -> CommandResult<TaskDetail> {
+    let conn = open_connection(&app)?;
+    get_task_detail(&conn, input)
 }
 
 #[tauri::command]
@@ -958,6 +978,22 @@ fn list_recent_threads(conn: &Connection, limit: i64) -> CommandResult<Vec<Recen
         .map_err(to_internal_error)
 }
 
+fn get_task_detail(conn: &Connection, input: GetTaskDetailInput) -> CommandResult<TaskDetail> {
+    let task = require_task(conn, &input.task_id)?;
+    let sessions = list_task_sessions(conn, &task.id)?;
+    let total_duration_seconds = sessions
+        .iter()
+        .filter(|session| session.end_reason.as_deref() != Some(END_REASON_DISCARDED))
+        .filter_map(|session| session.duration_seconds)
+        .sum();
+
+    Ok(TaskDetail {
+        task: Task::from(task),
+        sessions: sessions.into_iter().map(Session::from).collect(),
+        total_duration_seconds,
+    })
+}
+
 fn start_session(conn: &Connection, input: StartSessionInput) -> CommandResult<ActiveSession> {
     let tx = conn.unchecked_transaction().map_err(to_internal_error)?;
     if get_active_session(&tx)?.is_some() {
@@ -1555,6 +1591,29 @@ fn list_today_backlog_tasks(conn: &Connection, limit: i64) -> CommandResult<Vec<
 
     rows.map(|row| row.map(Task::from))
         .collect::<Result<Vec<_>, _>>()
+        .map_err(to_internal_error)
+}
+
+fn list_task_sessions(conn: &Connection, task_id: &str) -> CommandResult<Vec<DbSession>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                id, task_id, started_at, ended_at, duration_seconds, end_reason,
+                progress_note, next_action, lap_duration_seconds,
+                recovered_from_crash, created_at, updated_at
+            FROM sessions
+            WHERE task_id = ?1
+            ORDER BY COALESCE(ended_at, started_at) DESC, started_at DESC
+            "#,
+        )
+        .map_err(to_internal_error)?;
+
+    let rows = stmt
+        .query_map(params![task_id], |row| db_session_from_row(row, 0))
+        .map_err(to_internal_error)?;
+
+    rows.collect::<Result<Vec<_>, _>>()
         .map_err(to_internal_error)
 }
 
@@ -2548,6 +2607,130 @@ mod tests {
                 .map(|task| task.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["pickup-local-today", "pickup-next-local-day"]
+        );
+    }
+
+    #[test]
+    fn list_recent_threads_orders_by_last_worked_and_includes_completed_sessions() {
+        let conn = in_memory_db();
+        for task in [
+            task_fixture(
+                "recent-stopped-task",
+                "Stopped task",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_PICKUP,
+                0,
+                None,
+                "2026-05-01T00:00:00.000Z",
+                10,
+            ),
+            task_fixture(
+                "recent-completed-task",
+                "Completed task",
+                TASK_KIND_PICKUP,
+                TASK_STATUS_COMPLETED,
+                0,
+                None,
+                "2026-05-01T00:00:00.000Z",
+                20,
+            ),
+        ] {
+            persistence::insert_task(&conn, &task).expect("insert task fixture");
+        }
+
+        persistence::insert_session(
+            &conn,
+            &session_fixture(
+                "session-stopped",
+                "recent-stopped-task",
+                "2026-05-10T10:00:00.000Z",
+                "2026-05-10T10:15:00.000Z",
+            ),
+        )
+        .expect("insert stopped session");
+        let mut completed = session_fixture(
+            "session-completed",
+            "recent-completed-task",
+            "2026-05-10T11:00:00.000Z",
+            "2026-05-10T11:15:00.000Z",
+        );
+        completed.end_reason = Some(END_REASON_COMPLETED.to_string());
+        persistence::insert_session(&conn, &completed).expect("insert completed session");
+
+        let threads = list_recent_threads(&conn, 10).expect("list recent threads");
+
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-completed", "session-stopped"]
+        );
+        assert_eq!(
+            threads[0].session.end_reason.as_deref(),
+            Some(END_REASON_COMPLETED)
+        );
+        assert_eq!(threads[0].duration_seconds, Some(900));
+    }
+
+    #[test]
+    fn task_detail_excludes_discarded_sessions_from_total_but_marks_history() {
+        let conn = in_memory_db();
+        let mut task = task_fixture(
+            "detail-task",
+            "Detail task",
+            TASK_KIND_LONG_TERM,
+            TASK_STATUS_BACKLOG,
+            0,
+            None,
+            "2026-05-01T00:00:00.000Z",
+            10,
+        );
+        task.description = "Inspect recoverable history".to_string();
+        persistence::insert_task(&conn, &task).expect("insert detail task");
+
+        persistence::insert_session(
+            &conn,
+            &session_fixture(
+                "session-counted",
+                "detail-task",
+                "2026-05-10T10:00:00.000Z",
+                "2026-05-10T10:15:00.000Z",
+            ),
+        )
+        .expect("insert counted session");
+        let mut discarded = session_fixture(
+            "session-discarded",
+            "detail-task",
+            "2026-05-10T11:00:00.000Z",
+            "2026-05-10T11:15:00.000Z",
+        );
+        discarded.end_reason = Some(END_REASON_DISCARDED.to_string());
+        discarded.progress_note = Some("Accidental startup".to_string());
+        persistence::insert_session(&conn, &discarded).expect("insert discarded session");
+
+        let detail = get_task_detail(
+            &conn,
+            GetTaskDetailInput {
+                task_id: "detail-task".to_string(),
+            },
+        )
+        .expect("read task detail");
+
+        assert_eq!(detail.task.title, "Detail task");
+        assert_eq!(detail.task.description, "Inspect recoverable history");
+        assert_eq!(detail.total_duration_seconds, 900);
+        assert_eq!(
+            detail
+                .sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-discarded", "session-counted"]
+        );
+        assert_eq!(
+            detail.sessions[0].end_reason.as_deref(),
+            Some(END_REASON_DISCARDED)
         );
     }
 

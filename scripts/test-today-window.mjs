@@ -15,7 +15,9 @@ import {
   canStartTask,
   createEmptyTodayPayload,
   createQuickCaptureInput,
+  createTaskDetailViewModel,
   createTodayViewModel,
+  renderTaskDetailSnapshot,
   renderTodaySnapshot,
   todayEmptyStates
 } from "../src/lib/todayView.js";
@@ -128,6 +130,74 @@ assert.match(rendered.pickup[0], /Draft launch note/);
 assert.match(rendered.pickup[0], /Write the first paragraph/);
 assert.match(rendered.recentThreads[0], /Outlined the launch sections/);
 assert.match(rendered.backlog[0], /Rework onboarding/);
+
+const detailModel = createTaskDetailViewModel({
+  task: {
+    ...longTermTask,
+    description: "Make the first-run path easier to resume"
+  },
+  totalDurationSeconds: 5400,
+  sessions: [
+    {
+      id: "session-detail-2",
+      taskId: longTermTask.id,
+      startedAt: "2026-05-10T10:00:00.000Z",
+      endedAt: "2026-05-10T11:00:00.000Z",
+      durationSeconds: 3600,
+      endReason: "stopped",
+      progressNote: "Mapped the handoff flow",
+      nextAction: "Sketch the recovery panel",
+      lapDurationSeconds: 60,
+      recoveredFromCrash: false,
+      createdAt: "2026-05-10T10:00:00.000Z",
+      updatedAt: "2026-05-10T11:00:00.000Z"
+    },
+    {
+      id: "session-discarded",
+      taskId: longTermTask.id,
+      startedAt: "2026-05-10T12:00:00.000Z",
+      endedAt: "2026-05-10T12:05:00.000Z",
+      durationSeconds: 300,
+      endReason: "discarded",
+      progressNote: "Accidental open",
+      nextAction: null,
+      lapDurationSeconds: 60,
+      recoveredFromCrash: true,
+      createdAt: "2026-05-10T12:00:00.000Z",
+      updatedAt: "2026-05-10T12:05:00.000Z"
+    }
+  ]
+});
+assert.equal(detailModel.title, "Rework onboarding");
+assert.equal(detailModel.kind, "Long-term");
+assert.equal(detailModel.status, "Backlog");
+assert.equal(detailModel.totalDuration, "1h 30m");
+assert.equal(detailModel.sessions[1].duration, "Discarded / excluded from total");
+assert.equal(detailModel.progressNotes.length, 2);
+
+const detailSnapshot = renderTaskDetailSnapshot({
+  task: {
+    ...longTermTask,
+    description: "Make the first-run path easier to resume"
+  },
+  totalDurationSeconds: 5400,
+  sessions: detailModel.sessions.map((row, index) => ({
+    id: row.id,
+    taskId: longTermTask.id,
+    startedAt: index === 0 ? "2026-05-10T10:00:00.000Z" : "2026-05-10T12:00:00.000Z",
+    endedAt: index === 0 ? "2026-05-10T11:00:00.000Z" : "2026-05-10T12:05:00.000Z",
+    durationSeconds: index === 0 ? 3600 : 300,
+    endReason: index === 0 ? "stopped" : "discarded",
+    progressNote: row.progressNote,
+    nextAction: row.nextAction,
+    lapDurationSeconds: 60,
+    recoveredFromCrash: index !== 0,
+    createdAt: "2026-05-10T10:00:00.000Z",
+    updatedAt: "2026-05-10T11:00:00.000Z"
+  }))
+});
+assert(detailSnapshot.some((line) => /Sketch the recovery panel/.test(line)));
+assert(detailSnapshot.some((line) => /excluded from total/.test(line)));
 
 assert.equal(pointerTravelDistance({ x: 4, y: 8 }, { x: 7, y: 12 }), 5);
 assert.equal(
