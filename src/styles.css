@@ -19,6 +19,7 @@
   --thread-ink-muted: #787774;
   --thread-ink-soft: #9b9a97;
   --thread-accent: #65756a;
+  --thread-focus: #4f6658;
   --thread-danger: #8f5d52;
 }
 
@@ -53,6 +54,7 @@ button {
   cursor: pointer;
   font-size: 0.875rem;
   line-height: 1.1;
+  min-height: 2.18rem;
   padding: 0.55rem 0.78rem;
 }
 
@@ -70,7 +72,8 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid var(--thread-accent);
-  outline-offset: 2px;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 4px rgb(101 117 106 / 16%);
 }
 
 h1,
@@ -136,8 +139,11 @@ time {
 
 .header-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.55rem;
+  min-width: 0;
 }
 
 .quiet-button,
@@ -171,6 +177,21 @@ time {
   border-radius: 8px;
   background: var(--thread-surface);
   padding: 0.75rem 0.8rem;
+}
+
+.task-filter {
+  grid-template-columns: 4rem minmax(0, 1fr);
+  align-items: center;
+  border: 1px solid var(--thread-border);
+  border-radius: 8px;
+  background: var(--thread-surface);
+  padding: 0.55rem 0.7rem;
+}
+
+.task-filter input {
+  min-height: 2rem;
+  border-color: var(--thread-border);
+  background: var(--thread-surface-subtle);
 }
 
 .settings-row {
@@ -319,8 +340,8 @@ time {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.8rem;
-  min-height: 4.4rem;
-  padding: 0.72rem 0.8rem;
+  min-height: 4.05rem;
+  padding: 0.62rem 0.75rem;
 }
 
 .task-row + .task-row {
@@ -329,6 +350,11 @@ time {
 
 .task-row:hover {
   background: var(--thread-surface-subtle);
+}
+
+.task-row.selected {
+  background: var(--thread-selected);
+  box-shadow: inset 3px 0 0 var(--thread-focus);
 }
 
 .task-copy {
@@ -363,7 +389,9 @@ time {
 
 .row-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.45rem;
 }
 
@@ -508,7 +536,8 @@ input[type="checkbox"] {
 .floating-shell {
   position: relative;
   display: grid;
-  gap: 0.55rem;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.45rem;
   width: 100%;
   min-height: 100vh;
   border: 1px solid var(--thread-border);
@@ -517,7 +546,7 @@ input[type="checkbox"] {
   box-shadow: 0 10px 28px rgb(55 53 47 / 16%);
   cursor: default;
   overflow: hidden;
-  padding: 0.7rem;
+  padding: 0.62rem;
   user-select: none;
 }
 
@@ -599,6 +628,7 @@ input[type="checkbox"] {
 }
 
 .donut-progress {
+  stroke: var(--thread-accent);
   transform: rotate(-90deg);
   transform-origin: 50% 50%;
 }
@@ -607,9 +637,8 @@ input[type="checkbox"] {
   position: absolute;
   right: 0.55rem;
   bottom: 0.55rem;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.35rem;
   max-width: calc(100% - 1.1rem);
   border: 1px solid var(--thread-border);
@@ -622,8 +651,9 @@ input[type="checkbox"] {
 .floating-menu button {
   background: var(--thread-surface);
   color: var(--thread-ink);
-  font-size: 0.76rem;
-  padding: 0.38rem 0.48rem;
+  font-size: 0.74rem;
+  min-height: 1.9rem;
+  padding: 0.34rem 0.42rem;
 }
 
 .floating-menu button:hover:not(:disabled) {
@@ -643,6 +673,10 @@ input[type="checkbox"] {
   .header-actions {
     justify-content: space-between;
     width: 100%;
+  }
+
+  .task-filter {
+    grid-template-columns: 1fr;
   }
 
   .quick-capture {
@@ -686,6 +720,11 @@ input[type="checkbox"] {
 
   .row-actions {
     justify-content: flex-start;
+  }
+
+  button {
+    max-width: 100%;
+    white-space: normal;
   }
 
   .task-detail-grid {

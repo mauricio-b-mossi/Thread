@@ -32,6 +32,7 @@
     shouldOpenFloatingWindowMenuOnPointerUp
   } from "./lib/floatingWindow.js";
   import { parseEntryLocation } from "./lib/entryRoute.js";
+  import { getTodayKeyboardCommand } from "./lib/keyboard.js";
   import type {
     ActiveSession,
     CreateTaskInput,
@@ -47,13 +48,23 @@
     createEmptyTodayPayload,
     createQuickCaptureInput,
     createTaskDetailViewModel,
-    createTodayViewModel
+    createTodayViewModel,
+    filterTodayRows
   } from "./lib/todayView.js";
 
   type EntryRoute = "today" | "floating";
   type EntryIntent = "settings" | "stop-current-task" | null;
   type LifecycleAction = "complete" | "stop" | "switch";
   type SessionDestination = "pickup" | "backlog";
+  type KeyboardTaskRow = {
+    id: string;
+    task: Task;
+    title: string;
+    nextAction?: string | null;
+    progressNote?: string | null;
+    metadata: string;
+    canStart: boolean;
+  };
 
   const getEntryLocation = (): { route: EntryRoute; intent: EntryIntent } => {
     if (typeof window === "undefined") {
@@ -112,11 +123,27 @@
   let selectedTaskDetail = $state<TaskDetail | null>(null);
   let loadingTaskDetail = $state(false);
   let taskDetailAction = $state<"complete" | "archive" | null>(null);
+  let taskFilterQuery = $state("");
+  let selectedTaskId = $state<string | null>(null);
 
   const todayView = $derived(createTodayViewModel(todayPayload));
   const taskDetailView = $derived(
     selectedTaskDetail ? createTaskDetailViewModel(selectedTaskDetail) : null
   );
+  const filteredPickupRows = $derived(
+    filterTodayRows(todayView.pickup.rows, taskFilterQuery) as KeyboardTaskRow[]
+  );
+  const filteredRecentThreadRows = $derived(
+    filterTodayRows(todayView.recentThreads.rows, taskFilterQuery) as KeyboardTaskRow[]
+  );
+  const filteredBacklogRows = $derived(
+    filterTodayRows(todayView.backlog.rows, taskFilterQuery) as KeyboardTaskRow[]
+  );
+  const keyboardTaskRows = $derived([
+    ...filteredPickupRows,
+    ...filteredBacklogRows,
+    ...filteredRecentThreadRows
+  ]);
   const activeSession = $derived(todayPayload.activeSession);
   const hasActiveTask = $derived(Boolean(activeSession));
   const activeTaskIsLongTerm = $derived(activeSession?.task.kind === "long_term");
@@ -549,6 +576,101 @@
     return hasActiveTask ? "Switch" : "Start";
   };
 
+  const getRowTaskId = (row: KeyboardTaskRow) => row.task.id;
+
+  const selectDefaultKeyboardTask = () => {
+    const firstStartableRow = keyboardTaskRows.find((row) => canUseStartButton(row.canStart, getRowTaskId(row)));
+    selectedTaskId = firstStartableRow ? getRowTaskId(firstStartableRow) : null;
+  };
+
+  $effect(() => {
+    if (
+      selectedTaskId &&
+      keyboardTaskRows.some((row) => getRowTaskId(row) === selectedTaskId)
+    ) {
+      return;
+    }
+
+    selectDefaultKeyboardTask();
+  });
+
+  const focusQuickCaptureTitle = () => {
+    document.querySelector<HTMLInputElement>('input[name="title"]')?.focus();
+  };
+
+  const focusTaskFilter = () => {
+    document.querySelector<HTMLInputElement>('input[name="task-filter"]')?.focus();
+  };
+
+  const beginSelectedTask = () => {
+    const selectedRow = keyboardTaskRows.find((row) => getRowTaskId(row) === selectedTaskId);
+    if (!selectedRow || !canUseStartButton(selectedRow.canStart, getRowTaskId(selectedRow))) {
+      return;
+    }
+
+    void beginTask(selectedRow.task);
+  };
+
+  const closeOrHideToday = () => {
+    if (floatingMenuOpen) {
+      floatingMenuOpen = false;
+      return;
+    }
+
+    if (selectedTaskDetail) {
+      selectedTaskDetail = null;
+      return;
+    }
+
+    if (settingsOpen) {
+      settingsOpen = false;
+      return;
+    }
+
+    if (route === "today" && !recoverySession) {
+      void getCurrentWindow().hide();
+    }
+  };
+
+  const submitStopForm = (target: EventTarget | null) => {
+    const stopFormTarget =
+      target instanceof Element && target.closest("[data-stop-form]") !== null;
+
+    if (
+      stopFormTarget &&
+      route === "today" &&
+      activeSession &&
+      endingAction === null &&
+      switchingTaskId === null
+    ) {
+      void endActiveSession("stop");
+    }
+  };
+
+  const handleGlobalKeydown = (event: KeyboardEvent) => {
+    const command = getTodayKeyboardCommand(event);
+    if (!command) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (command === "new-task") {
+      focusQuickCaptureTitle();
+    } else if (command === "filter") {
+      focusTaskFilter();
+    } else if (command === "start-selected") {
+      beginSelectedTask();
+    } else if (command === "escape") {
+      closeOrHideToday();
+    } else if (command === "settings") {
+      settingsOpen = true;
+      void refreshSettings();
+    } else if (command === "submit-stop") {
+      submitStopForm(event.target);
+    }
+  };
+
   const showTodayWindow = async () => {
     floatingMenuOpen = false;
     errorMessage = "";
@@ -751,7 +873,7 @@
   });
 </script>
 
-<svelte:window onhashchange={updateRoute} onpopstate={updateRoute} />
+<svelte:window onhashchange={updateRoute} onkeydown={handleGlobalKeydown} onpopstate={updateRoute} />
 
 {#if route === "floating"}
   <main
@@ -787,7 +909,6 @@
                 cy="24"
                 r={donutRadius}
                 pathLength="1"
-                stroke={donutLap.color}
                 stroke-dasharray={`${donutLap.progress} ${1 - donutLap.progress}`}
               ></circle>
             </svg>
@@ -897,6 +1018,16 @@
         </button>
       </div>
     </header>
+
+    <label class="task-filter">
+      <span>Filter</span>
+      <input
+        bind:value={taskFilterQuery}
+        name="task-filter"
+        autocomplete="off"
+        placeholder="Search tasks"
+      />
+    </label>
 
     {#if settingsOpen}
       <section class="settings-panel" aria-label="Settings">
@@ -1015,7 +1146,7 @@
             </button>
           {/if}
         </div>
-        <form class="session-controls" onsubmit={(event) => event.preventDefault()}>
+        <form class="session-controls" data-stop-form onsubmit={(event) => event.preventDefault()}>
           <label>
             <span>Progress note{activeTaskIsLongTerm ? " required to stop or switch" : ""}</span>
             <textarea bind:value={sessionProgressNote} name="progress-note" rows="2"></textarea>
@@ -1152,15 +1283,18 @@
     <section class="today-section" aria-labelledby="pickup-heading">
       <div class="section-heading">
         <h2 id="pickup-heading">Pickup</h2>
-        <span>{todayView.pickup.rows.length}</span>
+        <span>{filteredPickupRows.length}</span>
       </div>
 
-      {#if todayView.pickup.rows.length === 0}
+      {#if filteredPickupRows.length === 0}
         <p class="empty-state">{todayView.pickup.emptyText}</p>
       {:else}
         <ul class="task-list">
-          {#each todayView.pickup.rows as row (row.id)}
-            <li class="task-row">
+          {#each filteredPickupRows as row (row.id)}
+            <li
+              class:selected={selectedTaskId === row.task.id}
+              class="task-row"
+            >
               <div class="task-copy">
                 <h3>{row.title}</h3>
                 {#if row.nextAction}
@@ -1194,15 +1328,18 @@
     <section class="today-section" aria-labelledby="recent-heading">
       <div class="section-heading">
         <h2 id="recent-heading">Recent Threads</h2>
-        <span>{todayView.recentThreads.rows.length}</span>
+        <span>{filteredRecentThreadRows.length}</span>
       </div>
 
-      {#if todayView.recentThreads.rows.length === 0}
+      {#if filteredRecentThreadRows.length === 0}
         <p class="empty-state">{todayView.recentThreads.emptyText}</p>
       {:else}
         <ul class="task-list">
-          {#each todayView.recentThreads.rows as row (row.id)}
-            <li class="task-row">
+          {#each filteredRecentThreadRows as row (row.id)}
+            <li
+              class:selected={selectedTaskId === row.task.id}
+              class="task-row"
+            >
               <div class="task-copy">
                 <h3>{row.title}</h3>
                 {#if row.progressNote}
@@ -1239,15 +1376,18 @@
     <section class="today-section" aria-labelledby="backlog-heading">
       <div class="section-heading">
         <h2 id="backlog-heading">Backlog</h2>
-        <span>{todayView.backlog.rows.length}</span>
+        <span>{filteredBacklogRows.length}</span>
       </div>
 
-      {#if todayView.backlog.rows.length === 0}
+      {#if filteredBacklogRows.length === 0}
         <p class="empty-state">{todayView.backlog.emptyText}</p>
       {:else}
         <ul class="task-list">
-          {#each todayView.backlog.rows as row (row.id)}
-            <li class="task-row">
+          {#each filteredBacklogRows as row (row.id)}
+            <li
+              class:selected={selectedTaskId === row.task.id}
+              class="task-row"
+            >
               <div class="task-copy">
                 <h3>{row.title}</h3>
                 {#if row.nextAction}
