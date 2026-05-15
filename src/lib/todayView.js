@@ -81,6 +81,23 @@ export function createTodayViewModel(payload) {
 }
 
 /**
+ * @param {Array<Record<string, unknown>>} rows
+ * @param {string} query
+ */
+export function filterTodayRows(rows, query) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return rows;
+  }
+
+  return rows.filter((row) =>
+    [row.title, row.nextAction, row.progressNote, row.metadata]
+      .filter((value) => typeof value === "string")
+      .some((value) => value.toLowerCase().includes(normalizedQuery))
+  );
+}
+
+/**
  * @param {TodayPayload} payload
  */
 export function renderTodaySnapshot(payload) {

@@ -12,11 +12,18 @@ import {
 } from "../src/lib/floatingWindow.js";
 import { parseEntryLocation } from "../src/lib/entryRoute.js";
 import {
+  getTodayKeyboardCommand,
+  isEditableTarget,
+  isInteractiveTarget,
+  isStopFormTarget
+} from "../src/lib/keyboard.js";
+import {
   canStartTask,
   createEmptyTodayPayload,
   createQuickCaptureInput,
   createTaskDetailViewModel,
   createTodayViewModel,
+  filterTodayRows,
   renderTaskDetailSnapshot,
   renderTodaySnapshot,
   todayEmptyStates
@@ -124,6 +131,8 @@ assert.equal(model.recentThreads.rows[0].progressNote, "Outlined the launch sect
 assert.equal(model.backlog.rows[0].title, "Rework onboarding");
 assert.equal(canStartTask(baseTask), true);
 assert.equal(canStartTask(payload.activeSession.task), false);
+assert.deepEqual(filterTodayRows(model.pickup.rows, "first paragraph"), model.pickup.rows);
+assert.deepEqual(filterTodayRows(model.pickup.rows, "missing"), []);
 
 const rendered = renderTodaySnapshot(payload);
 assert.match(rendered.pickup[0], /Draft launch note/);
@@ -274,5 +283,25 @@ assert.deepEqual(parseEntryLocation({ hash: "", pathname: "/today" }), {
   route: "today",
   intent: null
 });
+
+assert.equal(isEditableTarget({ tagName: "INPUT" }), true);
+assert.equal(isInteractiveTarget({ matches: (selector) => selector.includes("button") }), true);
+assert.equal(isStopFormTarget({ closest: (selector) => selector === "[data-stop-form]" }), true);
+assert.equal(getTodayKeyboardCommand({ key: "n" }), "new-task");
+assert.equal(getTodayKeyboardCommand({ key: "/", target: { tagName: "INPUT" } }), null);
+assert.equal(getTodayKeyboardCommand({ key: "/", target: { tagName: "DIV" } }), "filter");
+assert.equal(getTodayKeyboardCommand({ key: "Enter" }), "start-selected");
+assert.equal(getTodayKeyboardCommand({ key: "Enter", target: { tagName: "BUTTON" } }), null);
+assert.equal(
+  getTodayKeyboardCommand({
+    key: "Enter",
+    ctrlKey: true,
+    target: { tagName: "TEXTAREA", closest: (selector) => selector === "[data-stop-form]" }
+  }),
+  "submit-stop"
+);
+assert.equal(getTodayKeyboardCommand({ key: "Enter", ctrlKey: true, target: { tagName: "TEXTAREA" } }), null);
+assert.equal(getTodayKeyboardCommand({ key: ",", ctrlKey: true }), "settings");
+assert.equal(getTodayKeyboardCommand({ key: "Escape", target: { tagName: "INPUT" } }), "escape");
 
 console.log("Today window behavior tests passed.");
