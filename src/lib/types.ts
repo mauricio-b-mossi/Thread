@@ -212,3 +212,15 @@ export interface OpenDataFolderResult {
 }
 
 export type OpenTodayWindowResult = null;
+
+export type OpenSettingsWindowResult = null;
+
+export type ShowFloatingTaskResult = null;
+
+export type StopCurrentTaskResult = ActiveSession | null;
+
+export interface ResetFloatingWindowPositionResult {
+  position: FloatingWindowPosition;
+}
+
+export type QuitAppResult = null;
