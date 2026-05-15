@@ -3,10 +3,12 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import {
+    archiveTask,
     completeSession,
     createTask,
     exportDatabase,
     getPendingSessionRecovery,
+    getTaskDetail,
     getSettings,
     openDataFolder,
     listToday,
@@ -17,6 +19,7 @@
     startSession,
     stopSession,
     switchTask,
+    updateTask,
     updateSettings
   } from "./lib/commands";
   import {
@@ -35,6 +38,7 @@
     RecoveryAction,
     Settings,
     Task,
+    TaskDetail,
     TaskKind,
     TodayPayload
   } from "./lib/types";
@@ -42,6 +46,7 @@
     canStartTask,
     createEmptyTodayPayload,
     createQuickCaptureInput,
+    createTaskDetailViewModel,
     createTodayViewModel
   } from "./lib/todayView.js";
 
@@ -104,8 +109,14 @@
   let recoveryProgressNote = $state("");
   let recoveryNextAction = $state("");
   let resolvingRecoveryAction = $state<RecoveryAction | null>(null);
+  let selectedTaskDetail = $state<TaskDetail | null>(null);
+  let loadingTaskDetail = $state(false);
+  let taskDetailAction = $state<"complete" | "archive" | null>(null);
 
   const todayView = $derived(createTodayViewModel(todayPayload));
+  const taskDetailView = $derived(
+    selectedTaskDetail ? createTaskDetailViewModel(selectedTaskDetail) : null
+  );
   const activeSession = $derived(todayPayload.activeSession);
   const hasActiveTask = $derived(Boolean(activeSession));
   const activeTaskIsLongTerm = $derived(activeSession?.task.kind === "long_term");
@@ -171,6 +182,20 @@
       return null;
     } finally {
       loadingToday = false;
+    }
+  };
+
+  const selectTaskDetail = async (taskId: string) => {
+    feedbackMessage = "";
+    errorMessage = "";
+    loadingTaskDetail = true;
+
+    try {
+      selectedTaskDetail = await getTaskDetail({ taskId });
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Task detail could not load.");
+    } finally {
+      loadingTaskDetail = false;
     }
   };
 
@@ -385,6 +410,51 @@
       errorMessage = getErrorMessage(error, "Task could not be started.");
     } finally {
       startingTaskId = null;
+    }
+  };
+
+  const completeTaskFromDetail = async () => {
+    if (!selectedTaskDetail || selectedTaskDetail.task.status === "active") {
+      return;
+    }
+
+    feedbackMessage = "";
+    errorMessage = "";
+    taskDetailAction = "complete";
+
+    try {
+      const task = await updateTask({
+        id: selectedTaskDetail.task.id,
+        status: "completed"
+      });
+      selectedTaskDetail = await getTaskDetail({ taskId: task.id });
+      feedbackMessage = "Task completed.";
+      await refreshToday();
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Task could not be completed.");
+    } finally {
+      taskDetailAction = null;
+    }
+  };
+
+  const archiveTaskFromDetail = async () => {
+    if (!selectedTaskDetail || selectedTaskDetail.task.status === "active") {
+      return;
+    }
+
+    feedbackMessage = "";
+    errorMessage = "";
+    taskDetailAction = "archive";
+
+    try {
+      const task = await archiveTask({ taskId: selectedTaskDetail.task.id });
+      selectedTaskDetail = await getTaskDetail({ taskId: task.id });
+      feedbackMessage = "Task archived.";
+      await refreshToday();
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Task could not be archived.");
+    } finally {
+      taskDetailAction = null;
     }
   };
 
@@ -935,6 +1005,15 @@
             <p class="next-action">{todayView.active.nextAction}</p>
           {/if}
           <p class="metadata">{todayView.active.metadata}</p>
+          {#if activeSession}
+            <button
+              class="quiet-button inline-detail-button"
+              type="button"
+              onclick={() => void selectTaskDetail(activeSession.task.id)}
+            >
+              Details
+            </button>
+          {/if}
         </div>
         <form class="session-controls" onsubmit={(event) => event.preventDefault()}>
           <label>
@@ -979,6 +1058,97 @@
       </section>
     {/if}
 
+    {#if taskDetailView}
+      <section class="today-section task-detail-panel" aria-label="Task detail">
+        <div class="section-heading">
+          <h2>{taskDetailView.title}</h2>
+          <button class="quiet-button" type="button" onclick={() => (selectedTaskDetail = null)}>
+            Close
+          </button>
+        </div>
+        <div class="task-detail-body">
+          {#if loadingTaskDetail}
+            <p class="metadata">Loading detail</p>
+          {/if}
+          {#if taskDetailView.description}
+            <p class="task-description">{taskDetailView.description}</p>
+          {/if}
+          <dl class="task-detail-grid">
+            <div>
+              <dt>Kind</dt>
+              <dd>{taskDetailView.kind}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{taskDetailView.status}</dd>
+            </div>
+            <div>
+              <dt>Total active time</dt>
+              <dd>{taskDetailView.totalDuration}</dd>
+            </div>
+            <div>
+              <dt>Next action</dt>
+              <dd>{taskDetailView.nextAction ?? "No next action"}</dd>
+            </div>
+          </dl>
+          <div class="session-actions">
+            <button
+              type="button"
+              disabled={taskDetailAction !== null || taskDetailView.task.status === "active"}
+              onclick={() => void completeTaskFromDetail()}
+            >
+              {taskDetailAction === "complete" ? "Completing" : "Complete task"}
+            </button>
+            <button
+              class="quiet-button"
+              type="button"
+              disabled={taskDetailAction !== null || taskDetailView.task.status === "active"}
+              onclick={() => void archiveTaskFromDetail()}
+            >
+              {taskDetailAction === "archive" ? "Archiving" : "Archive"}
+            </button>
+          </div>
+          <div class="detail-subsection">
+            <h3>Progress notes</h3>
+            {#if taskDetailView.progressNotes.length === 0}
+              <p class="empty-state compact">No progress notes yet</p>
+            {:else}
+              <ul class="history-list">
+                {#each taskDetailView.progressNotes as note (note.id)}
+                  <li>
+                    <p class="progress-note">{note.progressNote}</p>
+                    <p class="metadata">{note.when}</p>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+          <div class="detail-subsection">
+            <h3>Session history</h3>
+            {#if taskDetailView.sessions.length === 0}
+              <p class="empty-state compact">No sessions yet</p>
+            {:else}
+              <ul class="history-list">
+                {#each taskDetailView.sessions as session (session.id)}
+                  <li>
+                    <p class="metadata">
+                      {session.when} / {session.status}{session.duration ? ` / ${session.duration}` : ""}
+                    </p>
+                    {#if session.progressNote}
+                      <p class="progress-note">{session.progressNote}</p>
+                    {/if}
+                    {#if session.nextAction}
+                      <p class="next-action">{session.nextAction}</p>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        </div>
+      </section>
+    {/if}
+
     <section class="today-section" aria-labelledby="pickup-heading">
       <div class="section-heading">
         <h2 id="pickup-heading">Pickup</h2>
@@ -998,14 +1168,23 @@
                 {/if}
                 <p class="metadata">{row.metadata}</p>
               </div>
-              <button
-                class="row-action"
-                type="button"
-                disabled={!canUseStartButton(row.canStart, row.id)}
-                onclick={() => void beginTask(row.task)}
-              >
-                {startButtonLabel(row.canStart, row.id)}
-              </button>
+              <div class="row-actions">
+                <button
+                  class="quiet-button"
+                  type="button"
+                  onclick={() => void selectTaskDetail(row.id)}
+                >
+                  Details
+                </button>
+                <button
+                  class="row-action"
+                  type="button"
+                  disabled={!canUseStartButton(row.canStart, row.id)}
+                  onclick={() => void beginTask(row.task)}
+                >
+                  {startButtonLabel(row.canStart, row.id)}
+                </button>
+              </div>
             </li>
           {/each}
         </ul>
@@ -1034,14 +1213,23 @@
                 {/if}
                 <p class="metadata">{row.metadata}</p>
               </div>
-              <button
-                class="row-action"
-                type="button"
-                disabled={!canUseStartButton(row.canStart, row.task.id)}
-                onclick={() => void beginTask(row.task)}
-              >
-                {startButtonLabel(row.canStart, row.task.id)}
-              </button>
+              <div class="row-actions">
+                <button
+                  class="quiet-button"
+                  type="button"
+                  onclick={() => void selectTaskDetail(row.task.id)}
+                >
+                  Details
+                </button>
+                <button
+                  class="row-action"
+                  type="button"
+                  disabled={!canUseStartButton(row.canStart, row.task.id)}
+                  onclick={() => void beginTask(row.task)}
+                >
+                  {startButtonLabel(row.canStart, row.task.id)}
+                </button>
+              </div>
             </li>
           {/each}
         </ul>
@@ -1067,14 +1255,23 @@
                 {/if}
                 <p class="metadata">{row.metadata}</p>
               </div>
-              <button
-                class="row-action"
-                type="button"
-                disabled={!canUseStartButton(row.canStart, row.id)}
-                onclick={() => void beginTask(row.task)}
-              >
-                {startButtonLabel(row.canStart, row.id)}
-              </button>
+              <div class="row-actions">
+                <button
+                  class="quiet-button"
+                  type="button"
+                  onclick={() => void selectTaskDetail(row.id)}
+                >
+                  Details
+                </button>
+                <button
+                  class="row-action"
+                  type="button"
+                  disabled={!canUseStartButton(row.canStart, row.id)}
+                  onclick={() => void beginTask(row.task)}
+                >
+                  {startButtonLabel(row.canStart, row.id)}
+                </button>
+              </div>
             </li>
           {/each}
         </ul>

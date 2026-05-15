@@ -65,6 +65,16 @@ export interface RecentThread {
   durationSeconds: number | null;
 }
 
+export interface TaskDetail {
+  task: Task;
+  sessions: Session[];
+  totalDurationSeconds: number;
+}
+
+export interface GetTaskDetailInput {
+  taskId: string;
+}
+
 export interface FloatingWindowPosition {
   x: number;
   y: number;
@@ -123,6 +133,8 @@ export interface ListRecentThreadsInput {
 }
 
 export type ListRecentThreadsResult = RecentThread[];
+
+export type GetTaskDetailResult = TaskDetail;
 
 export interface StartSessionInput {
   taskId: string;

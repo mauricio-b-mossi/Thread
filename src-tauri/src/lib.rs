@@ -15,6 +15,7 @@ pub fn run() {
             commands::listToday,
             commands::listBacklog,
             commands::listRecentThreads,
+            commands::getTaskDetail,
             commands::startSession,
             commands::getActiveSession,
             commands::getPendingSessionRecovery,
