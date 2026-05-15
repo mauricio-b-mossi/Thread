@@ -10,6 +10,7 @@ import {
   renderFloatingWindowSnapshot,
   shouldOpenFloatingWindowMenuOnPointerUp
 } from "../src/lib/floatingWindow.js";
+import { parseEntryLocation } from "../src/lib/entryRoute.js";
 import {
   canStartTask,
   createEmptyTodayPayload,
@@ -186,5 +187,22 @@ assert.equal(wrappedPaletteLap.color, DONUT_COLORS[0]);
 const floatingSnapshot = renderFloatingWindowSnapshot(payload.activeSession);
 assert.deepEqual(floatingSnapshot, ["Active migration", "Write the first paragraph"]);
 assert(!floatingSnapshot.some((line) => /\d+:\d+|\b\d+\s*(s|sec|seconds|min|minutes)\b/i.test(line)));
+
+assert.deepEqual(parseEntryLocation({ hash: "#/floating", pathname: "/" }), {
+  route: "floating",
+  intent: null
+});
+assert.deepEqual(parseEntryLocation({ hash: "#/settings", pathname: "/" }), {
+  route: "today",
+  intent: "settings"
+});
+assert.deepEqual(parseEntryLocation({ hash: "#/stop-current-task", pathname: "/" }), {
+  route: "today",
+  intent: "stop-current-task"
+});
+assert.deepEqual(parseEntryLocation({ hash: "", pathname: "/today" }), {
+  route: "today",
+  intent: null
+});
 
 console.log("Today window behavior tests passed.");

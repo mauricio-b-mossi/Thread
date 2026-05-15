@@ -48,6 +48,11 @@ const EXPORT_FILE_EXTENSION: &str = ".sqlite3";
 const FLOATING_WINDOW_WIDTH: f64 = 280.0;
 const FLOATING_WINDOW_HEIGHT: f64 = 140.0;
 const FLOATING_WINDOW_MARGIN: i32 = 24;
+const TODAY_ROUTE: &str = "today";
+const SETTINGS_ROUTE: &str = "settings";
+const STOP_CURRENT_TASK_ROUTE: &str = "stop-current-task";
+const DEFAULT_FLOATING_WINDOW_POSITION: FloatingWindowPosition =
+    FloatingWindowPosition { x: 24, y: 24 };
 
 #[derive(Debug, Default)]
 pub struct PendingSessionRecovery(pub Mutex<Option<String>>);
@@ -305,6 +310,12 @@ pub struct OpenDataFolderResult {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetFloatingWindowPositionResult {
+    pub position: FloatingWindowPosition,
+}
+
 #[tauri::command]
 pub fn createTask(app: AppHandle, input: CreateTaskInput) -> CommandResult<Task> {
     let conn = open_connection(&app)?;
@@ -418,7 +429,7 @@ pub fn getSettings(app: AppHandle) -> CommandResult<Settings> {
 #[tauri::command]
 pub fn updateSettings(app: AppHandle, input: UpdateSettingsInput) -> CommandResult<Settings> {
     let conn = open_connection(&app)?;
-    update_settings(&conn, input)
+    update_settings_for_app(&app, &conn, input)
 }
 
 #[tauri::command]
@@ -464,6 +475,42 @@ pub fn openTodayWindow(app: AppHandle) -> CommandResult<()> {
     open_today_window(&app)
 }
 
+#[tauri::command]
+pub fn openSettingsWindow(app: AppHandle) -> CommandResult<()> {
+    open_settings_window(&app)
+}
+
+#[tauri::command]
+pub fn showFloatingTask(app: AppHandle) -> CommandResult<()> {
+    show_floating_task(&app)
+}
+
+#[tauri::command]
+pub fn stopCurrentTask(app: AppHandle) -> CommandResult<Option<ActiveSession>> {
+    stop_current_task(&app)
+}
+
+#[tauri::command]
+pub fn resetFloatingWindowPosition(
+    app: AppHandle,
+) -> CommandResult<ResetFloatingWindowPositionResult> {
+    let conn = open_connection(&app)?;
+    let position = save_floating_window_position(&conn, DEFAULT_FLOATING_WINDOW_POSITION)?;
+    if let Some(window) = app.get_webview_window("floating") {
+        window
+            .set_position(Position::Physical(PhysicalPosition::new(
+                position.x, position.y,
+            )))
+            .map_err(to_internal_error)?;
+    }
+    Ok(ResetFloatingWindowPositionResult { position })
+}
+
+#[tauri::command]
+pub fn quitApp(app: AppHandle) -> CommandResult<()> {
+    quit_app(&app)
+}
+
 fn open_connection(app: &AppHandle) -> CommandResult<Connection> {
     persistence::open_app_database(app).map_err(to_internal_error)
 }
@@ -473,9 +520,7 @@ fn open_floating_session_window(app: &AppHandle) -> CommandResult<()> {
     let position = floating_window_start_position(app, &settings)?;
 
     if let Some(window) = app.get_webview_window("floating") {
-        window
-            .set_always_on_top(true)
-            .map_err(to_internal_error)?;
+        window.set_always_on_top(true).map_err(to_internal_error)?;
         window
             .set_position(Position::Physical(PhysicalPosition::new(
                 position.x, position.y,
@@ -556,25 +601,143 @@ fn primary_monitor_scale_factor(app: &AppHandle) -> CommandResult<f64> {
         .unwrap_or(1.0))
 }
 
-fn open_today_window(app: &AppHandle) -> CommandResult<()> {
+pub fn open_today_window(app: &AppHandle) -> CommandResult<()> {
+    open_today_window_at(app, TODAY_ROUTE).map(|_| ())
+}
+
+fn open_today_window_at(app: &AppHandle, route: &str) -> CommandResult<TodayWindowState> {
     if let Some(today) = app.get_webview_window("today") {
         today.show().map_err(to_internal_error)?;
         today.set_focus().map_err(to_internal_error)?;
-        today.emit("session-changed", ()).map_err(to_internal_error)?;
-    } else {
-        WebviewWindowBuilder::new(app, "today", WebviewUrl::App("index.html#/today".into()))
-            .title("Thread")
-            .inner_size(720.0, 560.0)
-            .min_inner_size(360.0, 420.0)
-            .resizable(true)
-            .build()
+        if route != TODAY_ROUTE {
+            let _ = today.eval(format!("window.location.hash = '#/{route}';"));
+        }
+        today
+            .emit("session-changed", ())
             .map_err(to_internal_error)?;
+        hide_floating_window(app)?;
+        return Ok(TodayWindowState::Existing);
+    } else {
+        WebviewWindowBuilder::new(
+            app,
+            "today",
+            WebviewUrl::App(format!("index.html#/{route}").into()),
+        )
+        .title("Thread")
+        .inner_size(720.0, 560.0)
+        .min_inner_size(360.0, 420.0)
+        .resizable(true)
+        .build()
+        .map_err(to_internal_error)?;
     }
 
+    hide_floating_window(app)?;
+
+    Ok(TodayWindowState::Created)
+}
+
+fn hide_floating_window(app: &AppHandle) -> CommandResult<()> {
     if let Some(floating) = app.get_webview_window("floating") {
         floating.hide().map_err(to_internal_error)?;
     }
 
+    Ok(())
+}
+
+pub fn open_settings_window(app: &AppHandle) -> CommandResult<()> {
+    if matches!(
+        open_today_window_at(app, SETTINGS_ROUTE)?,
+        TodayWindowState::Existing
+    ) {
+        let Some(today) = app.get_webview_window("today") else {
+            return Ok(());
+        };
+        today.emit("open-settings", ()).map_err(to_internal_error)?;
+    }
+    Ok(())
+}
+
+pub fn show_floating_task(app: &AppHandle) -> CommandResult<()> {
+    if open_connection(app)?
+        .query_row(
+            "SELECT 1 FROM sessions WHERE ended_at IS NULL LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(to_internal_error)?
+        .is_some()
+    {
+        open_floating_session_window(app)
+    } else {
+        open_today_window(app)
+    }
+}
+
+pub fn stop_current_task(app: &AppHandle) -> CommandResult<Option<ActiveSession>> {
+    let conn = open_connection(app)?;
+    match stop_current_task_for_tray(&conn)? {
+        CurrentTaskStop::NoActiveSession => Ok(None),
+        CurrentTaskStop::RequiresUi => {
+            if matches!(
+                open_today_window_at(app, STOP_CURRENT_TASK_ROUTE)?,
+                TodayWindowState::Existing
+            ) {
+                app.emit("stop-current-task-requested", ())
+                    .map_err(to_internal_error)?;
+            }
+            Ok(None)
+        }
+        CurrentTaskStop::Stopped(stopped) => {
+            app.emit("session-changed", ()).map_err(to_internal_error)?;
+            Ok(Some(stopped))
+        }
+    }
+}
+
+pub fn quit_app(app: &AppHandle) -> CommandResult<()> {
+    let conn = open_connection(app)?;
+    preserve_unfinished_session_for_recovery(&conn)?;
+    app.exit(0);
+    Ok(())
+}
+
+enum CurrentTaskStop {
+    NoActiveSession,
+    RequiresUi,
+    Stopped(ActiveSession),
+}
+
+enum TodayWindowState {
+    Existing,
+    Created,
+}
+
+fn stop_current_task_for_tray(conn: &Connection) -> CommandResult<CurrentTaskStop> {
+    let Some(active_session) = get_active_session(conn)? else {
+        return Ok(CurrentTaskStop::NoActiveSession);
+    };
+
+    if active_session.task.kind == TASK_KIND_LONG_TERM {
+        return Ok(CurrentTaskStop::RequiresUi);
+    }
+
+    let stopped = stop_session(
+        conn,
+        StopSessionInput {
+            session_id: Some(active_session.session.id),
+            progress_note: None,
+            next_action: None,
+            destination_status: None,
+        },
+        END_REASON_STOPPED,
+    )?;
+
+    Ok(CurrentTaskStop::Stopped(stopped))
+}
+
+fn preserve_unfinished_session_for_recovery(conn: &Connection) -> CommandResult<()> {
+    let _ = get_active_session(conn)?;
     Ok(())
 }
 
@@ -880,6 +1043,20 @@ pub fn pending_recovery_from_startup(conn: &Connection) -> CommandResult<Pending
     Ok(PendingSessionRecovery(Mutex::new(session_id)))
 }
 
+pub fn pending_recovery_session_id(
+    pending_recovery: &PendingSessionRecovery,
+) -> CommandResult<Option<String>> {
+    Ok(pending_recovery
+        .0
+        .lock()
+        .map_err(|_| CommandError::internal("Session recovery state could not be read."))?
+        .clone())
+}
+
+pub fn settings_show_today_on_startup(conn: &Connection) -> CommandResult<bool> {
+    parse_bool_setting(conn, SETTING_STARTUP_TODAY_ON_STARTUP)
+}
+
 fn get_pending_session_recovery(
     conn: &Connection,
     pending_recovery: &PendingSessionRecovery,
@@ -1097,7 +1274,22 @@ fn get_settings(conn: &Connection) -> CommandResult<Settings> {
     })
 }
 
+fn update_settings_for_app(
+    app: &AppHandle,
+    conn: &Connection,
+    input: UpdateSettingsInput,
+) -> CommandResult<Settings> {
+    validate_settings_input(&input)?;
+    let startup_registration = input.launch_on_startup;
+    if let Some(enabled) = startup_registration {
+        set_startup_registration(app, enabled)?;
+    }
+
+    update_settings(conn, input)
+}
+
 fn update_settings(conn: &Connection, input: UpdateSettingsInput) -> CommandResult<Settings> {
+    validate_settings_input(&input)?;
     let donut_lap_duration_seconds = input
         .donut_lap_duration_seconds
         .map(validate_lap_duration_seconds)
@@ -1157,6 +1349,30 @@ fn update_settings(conn: &Connection, input: UpdateSettingsInput) -> CommandResu
     let settings = get_settings(&tx)?;
     tx.commit().map_err(to_internal_error)?;
     Ok(settings)
+}
+
+fn validate_settings_input(input: &UpdateSettingsInput) -> CommandResult<()> {
+    if let Some(value) = input.donut_lap_duration_seconds {
+        validate_lap_duration_seconds(value)?;
+    }
+
+    if let Some(value) = &input.theme {
+        validate_required_text("theme", value.clone())?;
+    }
+
+    if let Some(position) = &input.floating_window_position {
+        validate_position(position)?;
+    }
+
+    if let Some(value) = &input.long_term_stop_requirements {
+        validate_required_text("longTermStopRequirements", value.clone())?;
+    }
+
+    if let Some(value) = &input.today_return_behavior {
+        validate_required_text("todayReturnBehavior", value.clone())?;
+    }
+
+    Ok(())
 }
 
 fn save_floating_window_position(
@@ -1736,6 +1952,66 @@ fn parse_position_setting(conn: &Connection) -> CommandResult<FloatingWindowPosi
 fn set_bool_setting(conn: &Connection, key: &str, value: bool) -> CommandResult<()> {
     persistence::set_setting(conn, key, if value { "true" } else { "false" })
         .map_err(to_internal_error)
+}
+
+fn set_startup_registration(_app: &AppHandle, enabled: bool) -> CommandResult<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let executable = std::env::current_exe().map_err(to_internal_error)?;
+        set_windows_startup_registration("Thread", &executable, enabled)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = _app;
+        let _ = enabled;
+        Err(CommandError::validation(
+            "Launch on startup is only supported on Windows.",
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_startup_registration(
+    name: &str,
+    executable: &Path,
+    enabled: bool,
+) -> CommandResult<()> {
+    let status = if enabled {
+        Command::new("reg")
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                name,
+                "/t",
+                "REG_SZ",
+                "/d",
+            ])
+            .arg(format!("\"{}\"", executable.display()))
+            .arg("/f")
+            .status()
+            .map_err(to_internal_error)?
+    } else {
+        Command::new("reg")
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                name,
+                "/f",
+            ])
+            .status()
+            .map_err(to_internal_error)?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CommandError::internal(format!(
+            "Windows startup registration failed with status {status}."
+        )))
+    }
 }
 
 fn db_task_from_row(row: &Row<'_>, offset: usize) -> rusqlite::Result<DbTask> {
@@ -2483,6 +2759,90 @@ mod tests {
     }
 
     #[test]
+    fn tray_stop_stops_pickup_without_extra_input() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start pickup session");
+
+        match stop_current_task_for_tray(&conn).expect("tray stop pickup") {
+            CurrentTaskStop::Stopped(stopped) => {
+                assert_eq!(stopped.task.id, task.id);
+                assert_eq!(
+                    stopped.session.end_reason.as_deref(),
+                    Some(END_REASON_STOPPED)
+                );
+            }
+            CurrentTaskStop::NoActiveSession | CurrentTaskStop::RequiresUi => {
+                panic!("pickup tray stop should end the session")
+            }
+        }
+
+        assert!(get_active_session(&conn)
+            .expect("read active session")
+            .is_none());
+    }
+
+    #[test]
+    fn tray_stop_routes_long_term_to_ui_for_required_fields() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_LONG_TERM)).expect("create task");
+        start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id.clone(),
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start long-term session");
+
+        match stop_current_task_for_tray(&conn).expect("tray stop long-term") {
+            CurrentTaskStop::RequiresUi => {}
+            CurrentTaskStop::NoActiveSession | CurrentTaskStop::Stopped(_) => {
+                panic!("long-term tray stop should require UI input")
+            }
+        }
+
+        assert_eq!(
+            get_active_session(&conn)
+                .expect("read active session")
+                .expect("still active")
+                .task
+                .id,
+            task.id
+        );
+    }
+
+    #[test]
+    fn quit_preservation_leaves_active_session_for_startup_recovery() {
+        let conn = in_memory_db();
+        let task = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("create task");
+        let active = start_session(
+            &conn,
+            StartSessionInput {
+                task_id: task.id,
+                lap_duration_seconds: Some(60),
+            },
+        )
+        .expect("start pickup session");
+
+        preserve_unfinished_session_for_recovery(&conn).expect("preserve active session");
+        let pending =
+            pending_recovery_from_startup(&conn).expect("read pending recovery after quit");
+
+        assert_eq!(
+            pending_recovery_session_id(&pending).expect("read pending session id"),
+            Some(active.session.id)
+        );
+    }
+
+    #[test]
     fn switch_task_ends_current_session_and_starts_target() {
         let conn = in_memory_db();
         let first = create_task(&conn, create_input(TASK_KIND_PICKUP)).expect("first task");
@@ -2566,9 +2926,7 @@ mod tests {
         assert_eq!(active.session.id, original.session.id);
         assert_eq!(active.task.id, first.id);
         assert_eq!(
-            require_task(&conn, &second.id)
-                .expect("read target")
-                .status,
+            require_task(&conn, &second.id).expect("read target").status,
             TASK_STATUS_PICKUP
         );
     }
@@ -2670,12 +3028,13 @@ mod tests {
         let task = result.task.expect("updated task returned");
 
         assert_eq!(session.end_reason.as_deref(), Some(END_REASON_APP_CLOSED));
-        assert_eq!(session.progress_note.as_deref(), Some("Recovered after restart"));
+        assert_eq!(
+            session.progress_note.as_deref(),
+            Some("Recovered after restart")
+        );
         assert_eq!(task.status, TASK_STATUS_PICKUP);
         assert_eq!(task.next_action.as_deref(), Some("Continue the draft"));
-        assert!(get_active_session(&conn)
-            .expect("read active")
-            .is_none());
+        assert!(get_active_session(&conn).expect("read active").is_none());
     }
 
     #[test]
@@ -2713,9 +3072,7 @@ mod tests {
                 .status,
             TASK_STATUS_PICKUP
         );
-        assert!(get_active_session(&conn)
-            .expect("read active")
-            .is_none());
+        assert!(get_active_session(&conn).expect("read active").is_none());
         assert!(!list_recent_threads(&conn, 10)
             .expect("list recent threads")
             .iter()
@@ -2982,6 +3339,37 @@ mod tests {
         assert_eq!(error.code, "validation");
         assert!(error.message.contains("Donut lap duration"));
         assert!(get_settings(&conn).expect("read settings").today_on_startup);
+    }
+
+    #[test]
+    fn update_settings_persists_startup_display_lap_theme_and_position() {
+        let conn = in_memory_db();
+
+        let settings = update_settings(
+            &conn,
+            UpdateSettingsInput {
+                launch_on_startup: Some(true),
+                today_on_startup: Some(false),
+                donut_lap_duration_seconds: Some(120),
+                theme: Some("notion_light".to_string()),
+                floating_window_position: Some(FloatingWindowPosition { x: 320, y: 180 }),
+                ..UpdateSettingsInput::default()
+            },
+        )
+        .expect("update settings");
+
+        assert!(settings.launch_on_startup);
+        assert!(!settings.today_on_startup);
+        assert_eq!(settings.donut_lap_duration_seconds, 120);
+        assert_eq!(settings.theme, "notion_light");
+        assert_eq!(
+            settings.floating_window_position,
+            FloatingWindowPosition { x: 320, y: 180 }
+        );
+        assert_eq!(
+            get_settings(&conn).expect("read persisted settings"),
+            settings
+        );
     }
 
     #[test]

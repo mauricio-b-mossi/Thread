@@ -17,12 +17,17 @@ import type {
   ListTodayResult,
   OpenTodayWindowResult,
   OpenDataFolderResult,
+  OpenSettingsWindowResult,
+  QuitAppResult,
+  ResetFloatingWindowPositionResult,
   ResolveSessionRecoveryInput,
   ResolveSessionRecoveryResult,
   SaveFloatingWindowPositionInput,
   SaveFloatingWindowPositionResult,
+  ShowFloatingTaskResult,
   StartSessionInput,
   StartSessionResult,
+  StopCurrentTaskResult,
   StopSessionInput,
   StopSessionResult,
   SwitchTaskInput,
@@ -92,3 +97,17 @@ export const openDataFolder = (): Promise<OpenDataFolderResult> =>
 
 export const openTodayWindow = (): Promise<OpenTodayWindowResult> =>
   invoke("openTodayWindow");
+
+export const openSettingsWindow = (): Promise<OpenSettingsWindowResult> =>
+  invoke("openSettingsWindow");
+
+export const showFloatingTask = (): Promise<ShowFloatingTaskResult> =>
+  invoke("showFloatingTask");
+
+export const stopCurrentTask = (): Promise<StopCurrentTaskResult> =>
+  invoke("stopCurrentTask");
+
+export const resetFloatingWindowPosition = (): Promise<ResetFloatingWindowPositionResult> =>
+  invoke("resetFloatingWindowPosition");
+
+export const quitApp = (): Promise<QuitAppResult> => invoke("quitApp");

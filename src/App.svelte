@@ -5,10 +5,13 @@
   import {
     completeSession,
     createTask,
+    exportDatabase,
     getPendingSessionRecovery,
     getSettings,
+    openDataFolder,
     listToday,
     openTodayWindow,
+    resetFloatingWindowPosition,
     resolveSessionRecovery,
     saveFloatingWindowPosition,
     startSession,
@@ -25,6 +28,7 @@
     isFloatingWindowDrag,
     shouldOpenFloatingWindowMenuOnPointerUp
   } from "./lib/floatingWindow.js";
+  import { parseEntryLocation } from "./lib/entryRoute.js";
   import type {
     ActiveSession,
     CreateTaskInput,
@@ -42,17 +46,16 @@
   } from "./lib/todayView.js";
 
   type EntryRoute = "today" | "floating";
+  type EntryIntent = "settings" | "stop-current-task" | null;
   type LifecycleAction = "complete" | "stop" | "switch";
   type SessionDestination = "pickup" | "backlog";
 
-  const getRoute = (): EntryRoute => {
+  const getEntryLocation = (): { route: EntryRoute; intent: EntryIntent } => {
     if (typeof window === "undefined") {
-      return "today";
+      return { route: "today", intent: null };
     }
 
-    const route =
-      window.location.hash.replace(/^#\/?/, "") || window.location.pathname.replace(/^\//, "");
-    return route === "floating" ? "floating" : "today";
+    return parseEntryLocation(window.location);
   };
 
   const today = new Date();
@@ -67,7 +70,9 @@
     day: "numeric"
   }).format(today);
 
-  let route = $state<EntryRoute>(getRoute());
+  const initialEntryLocation = getEntryLocation();
+
+  let route = $state<EntryRoute>(initialEntryLocation.route);
   let todayPayload = $state<TodayPayload>(createEmptyTodayPayload());
   let loadingToday = $state(false);
   let captureKind = $state<TaskKind>("pickup");
@@ -85,9 +90,12 @@
   let feedbackMessage = $state("");
   let errorMessage = $state("");
   let settings = $state<Settings | null>(null);
-  let settingsOpen = $state(false);
+  let settingsOpen = $state(initialEntryLocation.intent === "settings");
   let savingSettings = $state(false);
   let customLapDuration = $state("60");
+  let exportingDatabase = $state(false);
+  let openingDataFolder = $state(false);
+  let resettingFloatingPosition = $state(false);
   let floatingMenuOpen = $state(false);
   let floatingPointerStart = $state<{ x: number; y: number } | null>(null);
   let floatingDragStarted = $state(false);
@@ -114,7 +122,28 @@
   const donutRadius = 18;
 
   const updateRoute = () => {
-    route = getRoute();
+    const nextLocation = getEntryLocation();
+    route = nextLocation.route;
+    applyEntryIntent(nextLocation.intent);
+  };
+
+  const applyEntryIntent = (intent: EntryIntent) => {
+    if (intent === "settings") {
+      settingsOpen = true;
+      void refreshSettings();
+      return;
+    }
+
+    if (intent === "stop-current-task" && route !== "floating") {
+      showLongTermStopPrompt();
+    }
+  };
+
+  const showLongTermStopPrompt = () => {
+    feedbackMessage = "";
+    errorMessage =
+      "Add the required progress note and next action, then stop the long-term task.";
+    void refreshToday();
   };
 
   const getErrorMessage = (error: unknown, fallback: string) => {
@@ -157,6 +186,8 @@
         errorMessage = getErrorMessage(error, "Session recovery could not load.");
       }
     }
+
+    applyEntryIntent(initialEntryLocation.intent);
   };
 
   const refreshSettings = async () => {
@@ -187,6 +218,73 @@
 
   const saveCustomLapDuration = () => {
     void saveLapDuration(Number(customLapDuration));
+  };
+
+  const saveBooleanSetting = async (
+    key: "launchOnStartup" | "todayOnStartup",
+    value: boolean
+  ) => {
+    feedbackMessage = "";
+    errorMessage = "";
+    savingSettings = true;
+
+    try {
+      settings = await updateSettings({ [key]: value });
+      feedbackMessage = "Settings updated.";
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Settings could not be updated.");
+      await refreshSettings();
+    } finally {
+      savingSettings = false;
+    }
+  };
+
+  const resetFloatingPosition = async () => {
+    feedbackMessage = "";
+    errorMessage = "";
+    resettingFloatingPosition = true;
+
+    try {
+      const result = await resetFloatingWindowPosition();
+      if (settings) {
+        settings = { ...settings, floatingWindowPosition: result.position };
+      }
+      feedbackMessage = "Floating window position reset.";
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Floating window position could not be reset.");
+    } finally {
+      resettingFloatingPosition = false;
+    }
+  };
+
+  const exportDatabaseBackup = async () => {
+    feedbackMessage = "";
+    errorMessage = "";
+    exportingDatabase = true;
+
+    try {
+      const result = await exportDatabase();
+      feedbackMessage = `Database exported to ${result.path}.`;
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Database could not be exported.");
+    } finally {
+      exportingDatabase = false;
+    }
+  };
+
+  const revealDataFolder = async () => {
+    feedbackMessage = "";
+    errorMessage = "";
+    openingDataFolder = true;
+
+    try {
+      const result = await openDataFolder();
+      feedbackMessage = `Data folder opened: ${result.path}.`;
+    } catch (error) {
+      errorMessage = getErrorMessage(error, "Data folder could not be opened.");
+    } finally {
+      openingDataFolder = false;
+    }
   };
 
   const defaultSessionDestination = (task?: Task): SessionDestination =>
@@ -494,6 +592,33 @@
   onMount(() => {
     void initializeApp();
 
+    let removeOpenSettingsListener: (() => void) | null = null;
+    let removeCommandErrorListener: (() => void) | null = null;
+    let removeStopCurrentTaskListener: (() => void) | null = null;
+
+    void listen("open-settings", () => {
+      settingsOpen = true;
+      void refreshSettings();
+    }).then((unlisten) => {
+      removeOpenSettingsListener = unlisten;
+    });
+
+    void listen("command-error", ({ payload }) => {
+      errorMessage = getErrorMessage(payload, "Command could not be completed.");
+    }).then((unlisten) => {
+      removeCommandErrorListener = unlisten;
+    });
+
+    void listen("stop-current-task-requested", () => {
+      if (route === "floating") {
+        return;
+      }
+
+      showLongTermStopPrompt();
+    }).then((unlisten) => {
+      removeStopCurrentTaskListener = unlisten;
+    });
+
     if (route !== "floating") {
       let removeSessionListener: (() => void) | null = null;
 
@@ -504,6 +629,9 @@
       });
 
       return () => {
+        removeOpenSettingsListener?.();
+        removeCommandErrorListener?.();
+        removeStopCurrentTaskListener?.();
         removeSessionListener?.();
       };
     }
@@ -544,6 +672,9 @@
       }
 
       cancelAnimationFrame(animationFrame);
+      removeOpenSettingsListener?.();
+      removeCommandErrorListener?.();
+      removeStopCurrentTaskListener?.();
       removeMoveListener?.();
       removeSessionListener?.();
     };
@@ -699,6 +830,28 @@
 
     {#if settingsOpen}
       <section class="settings-panel" aria-label="Settings">
+        <div class="settings-row">
+          <label class="checkbox-label">
+            <input
+              checked={settings?.launchOnStartup ?? false}
+              type="checkbox"
+              disabled={savingSettings}
+              onchange={(event) =>
+                void saveBooleanSetting("launchOnStartup", event.currentTarget.checked)}
+            />
+            <span>Launch on startup</span>
+          </label>
+          <label class="checkbox-label">
+            <input
+              checked={settings?.todayOnStartup ?? true}
+              type="checkbox"
+              disabled={savingSettings}
+              onchange={(event) =>
+                void saveBooleanSetting("todayOnStartup", event.currentTarget.checked)}
+            />
+            <span>Show Today on startup</span>
+          </label>
+        </div>
         <div>
           <p class="section-kicker">Donut lap</p>
           <div class="lap-presets" role="group" aria-label="Preset lap durations">
@@ -728,6 +881,38 @@
             onchange={saveCustomLapDuration}
           />
         </label>
+        <div class="settings-row">
+          <div>
+            <p class="section-kicker">Theme</p>
+            <p class="settings-value">{settings?.theme ?? "notion_light"}</p>
+          </div>
+          <button
+            class="quiet-button"
+            type="button"
+            disabled={resettingFloatingPosition}
+            onclick={() => void resetFloatingPosition()}
+          >
+            {resettingFloatingPosition ? "Resetting" : "Reset floating window"}
+          </button>
+        </div>
+        <div class="settings-row">
+          <button
+            class="quiet-button"
+            type="button"
+            disabled={exportingDatabase}
+            onclick={() => void exportDatabaseBackup()}
+          >
+            {exportingDatabase ? "Exporting" : "Export database"}
+          </button>
+          <button
+            class="quiet-button"
+            type="button"
+            disabled={openingDataFolder}
+            onclick={() => void revealDataFolder()}
+          >
+            {openingDataFolder ? "Opening" : "Open data folder"}
+          </button>
+        </div>
       </section>
     {/if}
 
